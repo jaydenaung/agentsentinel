@@ -57,13 +57,14 @@ import uvicorn
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client, StdioServerParameters
-from mcp.server import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 from mcp.types import Tool
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.routing import Route
+from starlette.responses import Response
+from starlette.routing import Mount, Route
+from starlette.types import Receive, Scope, Send
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────
@@ -210,28 +211,20 @@ class SentinelMCPShim:
     def build_app(self) -> Starlette:
         sse_transport = SseServerTransport("/messages/")
 
-        async def handle_sse(request: Request) -> None:
-            async with sse_transport.connect_sse(
-                request.scope, request.receive, request._send
-            ) as streams:
-                init_options = InitializationOptions(
-                    server_name="sentinel-shim",
-                    server_version="0.1.0",
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
-                    ),
+        async def _handle_sse(scope: Scope, receive: Receive, send: Send) -> None:
+            async with sse_transport.connect_sse(scope, receive, send) as streams:
+                await self.server.run(
+                    streams[0], streams[1],
+                    self.server.create_initialization_options(),
                 )
-                await self.server.run(streams[0], streams[1], init_options)
 
-        async def handle_messages(request: Request) -> None:
-            await sse_transport.handle_post_message(
-                request.scope, request.receive, request._send
-            )
+        async def sse_endpoint(request: Request) -> Response:
+            await _handle_sse(request.scope, request.receive, request._send)  # type: ignore[reportPrivateUsage]
+            return Response()
 
         return Starlette(routes=[
-            Route("/sse", endpoint=handle_sse),
-            Route("/messages/", endpoint=handle_messages, methods=["POST"]),
+            Route("/sse", endpoint=sse_endpoint, methods=["GET"]),
+            Mount("/messages/", app=sse_transport.handle_post_message),
         ])
 
 
