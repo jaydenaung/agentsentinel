@@ -173,9 +173,17 @@ The `demo/` directory contains a mini agent that generates real traffic so the b
 
 ```
 demo/
-├── agent.py               # Demo agent — registers, adds grants, runs agentic loop
-├── sentinel_middleware.py # Reusable middleware that auto-reports every tool call
-└── mcp_shim.py            # MCP shim — transparent interceptor for any MCP server
+├── agent.py               # Standalone demo agent — registers with AgentSentinel,
+│                          #   adds tool grants, runs a 6-prompt Claude agentic loop
+├── sentinel_middleware.py # Reusable middleware — @SentinelTool decorator +
+│                          #   SentinelMiddleware class that auto-intercepts every
+│                          #   tool call, hashes I/O, and reports to AgentSentinel
+├── mcp_shim.py            # MCP shim — transparent SSE proxy that sits between any
+│                          #   MCP client and any MCP server (stdio or SSE) and
+│                          #   auto-reports every tool call; zero agent code changes
+├── test_shim.py           # Test client — connects to the shim, exercises tools,
+│                          #   and prints the resulting AgentSentinel trust score
+└── requirements.txt       # anthropic, httpx, mcp, uvicorn, starlette
 ```
 
 ### How it works
