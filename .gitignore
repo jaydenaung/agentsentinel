@@ -11,3 +11,6 @@ dist/
 build/
 ui/node_modules/
 ui/dist/
+nginx/certs/*.crt
+nginx/certs/*.key
+nginx/certs/*.pem

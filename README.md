@@ -16,15 +16,22 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
   ┌──────────────────┐  ┌─────────────────┐  ┌─────────────┐
   │  demo/agent.py   │  │  demo/mcp_shim  │  │  React UI   │
   │  (Claude loop +  │  │  (MCP proxy,    │  │  port 5173  │
-  │   SentinelMiddle │  │   zero-touch)   │  │             │
+  │   SentinelMiddle │  │   zero-touch)   │  │  (dev)      │
   │   ware)          │  │                 │  │             │
   └────────┬─────────┘  └────────┬────────┘  └──────┬──────┘
-           │  POST /api/v1/events │                  │ /api/*
+           │  HTTPS /api/         │                  │ /api/*
            └──────────────────────┘                  │
                         │                            │
   ─────────────────────────────────────────────────────────────
   ┌─────────────────────────────────────────────────────────┐
-  │                  FastAPI (port 9000)                     │
+  │              Nginx (port 443 / TLS termination)          │
+  │   HTTP :80 → redirect to HTTPS                          │
+  │   nginx/nginx.conf   nginx/certs/server.crt + .key      │
+  └──────────────────────┬──────────────────────────────────┘
+                         │ proxy_pass http://api:8000
+  ─────────────────────────────────────────────────────────────
+  ┌─────────────────────────────────────────────────────────┐
+  │            FastAPI (internal port 8000)                  │
   │  /api/v1/agents   /api/v1/events   /api/v1/findings     │
   │  /api/v1/agents/{id}/score         /api/v1/agents/{id}/ │
   └──────────────────────┬──────────────────────────────────┘
@@ -72,10 +79,14 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
 git clone <repo>
 cd agentsentinel
 cp .env.example .env
+
+# Generate a self-signed TLS certificate (first time only)
+./nginx/generate-certs.sh
+
 docker compose up
 ```
 
-The API is available at **http://localhost:9000**. Interactive docs at http://localhost:9000/docs.
+The API is available at **https://localhost/api/v1/** (via Nginx) or **http://localhost:9000** (direct, dev only). Interactive docs at https://localhost/docs.
 
 Run migrations (first time or after pulls):
 
@@ -331,6 +342,62 @@ python demo/mcp_shim.py \
 - Proxies `tools/list` and `tools/call` transparently to the real server
 - SHA-256 hashes every input/output before reporting (raw content never leaves the process)
 - Reports to AgentSentinel async — no latency added to tool calls
+
+---
+
+## TLS / HTTPS
+
+AgentSentinel ships with an Nginx reverse proxy that terminates TLS on port 443 and redirects plain HTTP (port 80) to HTTPS.
+
+```
+nginx/
+├── nginx.conf          # Nginx config — TLS, security headers, proxy rules
+├── generate-certs.sh   # Generates a self-signed cert for dev/testing
+└── certs/
+    ├── server.crt      # Certificate (gitignored — generated or org-provided)
+    └── server.key      # Private key  (gitignored — generated or org-provided)
+```
+
+### Self-signed certificate (dev / testing)
+
+```bash
+./nginx/generate-certs.sh
+docker compose up nginx
+```
+
+Your browser will show a certificate warning — this is expected for self-signed certs. Add a security exception, or import the cert into your OS/browser trust store.
+
+### Organisation CA certificate (production)
+
+Replace the two generated files with your org's CA-signed certificate:
+
+```bash
+cp /path/to/your/org.crt nginx/certs/server.crt
+cp /path/to/your/org.key nginx/certs/server.key
+docker compose restart nginx
+```
+
+No config changes required — Nginx picks up the files on restart. The cert files are gitignored so they are never committed to source control.
+
+### What Nginx enforces
+
+- TLS 1.2 and 1.3 only (1.0 and 1.1 disabled)
+- Strong cipher suite (ECDHE + AES-GCM / ChaCha20)
+- `Strict-Transport-Security` with 2-year max-age and `preload`
+- `X-Frame-Options: DENY`
+- `X-Content-Type-Options: nosniff`
+- Proxy headers (`X-Forwarded-For`, `X-Forwarded-Proto`) forwarded to FastAPI
+- SSE connections (`/api/v1/events` stream) not buffered — required for real-time anomaly scoring
+
+### Production note
+
+In production, remove the direct API port to force all traffic through Nginx:
+
+```yaml
+# docker-compose.yml — api service
+ports:
+  # - "9000:8000"   ← comment out or remove in production
+```
 
 ---
 
