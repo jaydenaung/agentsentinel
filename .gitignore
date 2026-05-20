@@ -9,6 +9,7 @@ htmlcov/
 *.egg-info/
 dist/
 build/
+ui/.env
 ui/node_modules/
 ui/dist/
 nginx/certs/*.crt
