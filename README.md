@@ -235,33 +235,78 @@ Agent  →  MCP Shim (port 8002)  →  Real MCP Server
 
 ```bash
 pip install -r demo/requirements.txt
+```
 
-# Against an SSE MCP server
-python demo/mcp_shim.py \
-    --upstream-url http://localhost:8001/sse \
-    --agent-name "my-rag-agent" \
-    --port 8002
+**Against a stdio MCP server** (tested — uses the official filesystem MCP server via npx):
 
-# Against a stdio MCP server (e.g. the filesystem MCP server)
-python demo/mcp_shim.py \
+```bash
+PYTHONUNBUFFERED=1 python demo/mcp_shim.py \
     --upstream-cmd "npx -y @modelcontextprotocol/server-filesystem /tmp" \
+    --agent-name "my-filesystem-agent" \
+    --port 8002
+```
+
+Expected startup output:
+```
+[shim] Registered agent   : <uuid> (my-filesystem-agent)
+[shim] upstream ready — proxying 14 tools: ['read_file', 'list_directory', ...]
+[shim] Added 14 tool grants
+[shim] Shim listening on  : http://0.0.0.0:8002/sse
+[shim] ← Point your agent here instead of the real MCP server
+```
+
+**Against an SSE MCP server** (remote or local):
+
+```bash
+PYTHONUNBUFFERED=1 python demo/mcp_shim.py \
+    --upstream-url http://localhost:8001/sse \
     --agent-name "my-rag-agent" \
     --port 8002
 ```
 
-Then change one line in your agent config — the MCP server URL — from the real server to the shim:
+Then change one line in your agent config:
 
 ```diff
 - mcp_server_url = "http://localhost:8001/sse"
 + mcp_server_url = "http://localhost:8002/sse"
 ```
 
-The shim automatically:
-- Registers a new agent in AgentSentinel (or reuse an existing one with `--agent-id`)
+### Test the shim
+
+With the shim running, use the included test client to verify interception end-to-end:
+
+```bash
+python demo/test_shim.py
+```
+
+It connects to the shim, lists proxied tools, makes several tool calls, then fetches and prints the AgentSentinel trust score. Each intercepted call appears in the shim log with its anomaly score:
+
+```
+[shim] tool=list_directory       anomaly=0.500
+[shim] tool=get_file_info        anomaly=0.500
+[shim] tool=search_files         anomaly=0.500
+```
+
+> **Note:** Anomaly scores start high (~0.9) for a brand-new agent with no baseline. After 20–30 calls the behavior engine builds a normal pattern and scores for routine calls drop toward 0.0–0.3. Unusual tools or call sequences score higher.
+
+### Reuse an existing agent
+
+To avoid registering a new agent on every shim restart, pass the agent UUID instead of a name:
+
+```bash
+python demo/mcp_shim.py \
+    --upstream-cmd "npx -y @modelcontextprotocol/server-filesystem /tmp" \
+    --agent-id <uuid-from-agentsentinel> \
+    --port 8002
+```
+
+### What the shim does automatically
+
+- Registers a new agent in AgentSentinel (or reuses one with `--agent-id`)
 - Discovers and registers grants for every tool the upstream server exposes
-- Proxies `tools/list` and `tools/call` transparently
-- SHA-256 hashes every input/output before reporting
-- Reports to AgentSentinel async (no added latency to tool calls)
+- Proxies `tools/list` and `tools/call` transparently to the real server
+- SHA-256 hashes every input/output before reporting (raw content never leaves the process)
+- Reports to AgentSentinel async — no latency added to tool calls
 
 ---
 
