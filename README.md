@@ -2,6 +2,8 @@
 
 AgentSentinel is an enterprise AI agent security platform that continuously monitors AI agents for over-permissioning and runtime anomalies. It combines static posture analysis (scanning tool grants and MCP server bindings) with live behavior monitoring (baselining tool-call patterns and detecting anomalies) into a single **Trust Score** per agent — giving security teams a unified signal to act on.
 
+![AgentSentinel Dashboard](img/agentsentinel1.png)
+
 ---
 
 ## Architecture
@@ -57,13 +59,21 @@ cp .env.example .env
 docker compose up
 ```
 
-The API is available at **http://localhost:8000**. Interactive docs at http://localhost:8000/docs.
+The API is available at **http://localhost:9000**. Interactive docs at http://localhost:9000/docs.
 
 Run migrations (first time or after pulls):
 
 ```bash
 docker compose exec api alembic upgrade head
 ```
+
+**Start the UI** (separate terminal):
+
+```bash
+cd ui && npm install && npm run dev
+```
+
+Open **http://localhost:5173** — the UI proxies all `/api` requests to the backend.
 
 ---
 
@@ -105,7 +115,7 @@ Trust Score = (Posture Score × 0.45) + (Behavior Score × 0.45) + (Recency × 0
 ### 1. Register an agent
 
 ```bash
-curl -s -X POST http://localhost:8000/api/v1/agents \
+curl -s -X POST http://localhost:9000/api/v1/agents \
   -H "Content-Type: application/json" \
   -d '{
     "name": "sales-rag-bot",
@@ -121,7 +131,7 @@ Save the returned `id` as `AGENT_ID`.
 ### 2. Add a tool grant
 
 ```bash
-curl -s -X POST http://localhost:8000/api/v1/agents/$AGENT_ID/grants \
+curl -s -X POST http://localhost:9000/api/v1/agents/$AGENT_ID/grants \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "crm_search",
@@ -137,7 +147,7 @@ curl -s -X POST http://localhost:8000/api/v1/agents/$AGENT_ID/grants \
 INPUT_HASH=$(echo -n "query: top accounts" | sha256sum | cut -d' ' -f1)
 OUTPUT_HASH=$(echo -n "account list json" | sha256sum | cut -d' ' -f1)
 
-curl -s -X POST http://localhost:8000/api/v1/events \
+curl -s -X POST http://localhost:9000/api/v1/events \
   -H "Content-Type: application/json" \
   -d "{
     \"agent_id\": \"$AGENT_ID\",
@@ -152,7 +162,7 @@ curl -s -X POST http://localhost:8000/api/v1/events \
 ### 4. Get the Trust Score
 
 ```bash
-curl -s http://localhost:8000/api/v1/agents/$AGENT_ID/score | jq .
+curl -s http://localhost:9000/api/v1/agents/$AGENT_ID/score | jq .
 ```
 
 ---
