@@ -174,7 +174,8 @@ The `demo/` directory contains a mini agent that generates real traffic so the b
 ```
 demo/
 ├── agent.py               # Demo agent — registers, adds grants, runs agentic loop
-└── sentinel_middleware.py # Reusable middleware that auto-reports every tool call
+├── sentinel_middleware.py # Reusable middleware that auto-reports every tool call
+└── mcp_shim.py            # MCP shim — transparent interceptor for any MCP server
 ```
 
 ### How it works
@@ -217,6 +218,50 @@ python demo/agent.py
 The agent registers itself, adds 5 tool grants (including dangerous `send_email` and `write_file` which immediately trigger posture findings), then works through 6 realistic prompts. Anomaly scores are printed after each tool call; trust score is fetched every 3 interactions.
 
 Each run creates a new agent in AgentSentinel — open **http://localhost:5173** to watch scores update in real time.
+
+---
+
+## MCP Shim (Zero-Touch Monitoring)
+
+`demo/mcp_shim.py` is a transparent MCP proxy. Point it at any existing MCP server and it intercepts every tool call — the agent and the real MCP server need **zero code changes**.
+
+```
+Agent  →  MCP Shim (port 8002)  →  Real MCP Server
+                │
+                └─► POST /api/v1/events  →  AgentSentinel
+```
+
+### Run the shim
+
+```bash
+pip install -r demo/requirements.txt
+
+# Against an SSE MCP server
+python demo/mcp_shim.py \
+    --upstream-url http://localhost:8001/sse \
+    --agent-name "my-rag-agent" \
+    --port 8002
+
+# Against a stdio MCP server (e.g. the filesystem MCP server)
+python demo/mcp_shim.py \
+    --upstream-cmd "npx -y @modelcontextprotocol/server-filesystem /tmp" \
+    --agent-name "my-rag-agent" \
+    --port 8002
+```
+
+Then change one line in your agent config — the MCP server URL — from the real server to the shim:
+
+```diff
+- mcp_server_url = "http://localhost:8001/sse"
++ mcp_server_url = "http://localhost:8002/sse"
+```
+
+The shim automatically:
+- Registers a new agent in AgentSentinel (or reuse an existing one with `--agent-id`)
+- Discovers and registers grants for every tool the upstream server exposes
+- Proxies `tools/list` and `tools/call` transparently
+- SHA-256 hashes every input/output before reporting
+- Reports to AgentSentinel async (no added latency to tool calls)
 
 ---
 
