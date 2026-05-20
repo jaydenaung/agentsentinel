@@ -398,9 +398,35 @@ curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
 
 ---
 
-## Part 2 — Run the Demo Agent (Claude API)
+## Demo Agents — Which One to Use?
 
-This runs a real Claude agentic loop that registers itself with AgentSentinel and auto-reports every tool call. No MCP required — uses the Anthropic API directly.
+There are two ways to generate live agent traffic for AgentSentinel. Pick the one that matches your situation:
+
+| | Demo Agent (Part 2) | MCP Shim (Part 3) |
+|---|---|---|
+| **File** | `demo/agent.py` | `demo/mcp_shim.py` |
+| **How it works** | A real Claude agentic loop with 5 simulated business tools (`search_crm`, `send_email`, etc.) instrumented directly via `SentinelMiddleware` | A transparent proxy that sits in front of any real MCP server — intercepts every tool call with zero changes to the agent or server |
+| **Code changes needed** | Yes — your agent imports `SentinelMiddleware` | None — just redirect your agent's MCP URL to the shim |
+| **Needs Anthropic API key** | Yes | No |
+| **Best for** | Seeing how to instrument an agent you own and control | Monitoring any MCP-connected agent, including third-party ones |
+| **Tools shown** | 5 simulated business tools | 14 real filesystem tools (via the official MCP filesystem server) |
+
+**TL;DR:** Use the demo agent if you want to see full Claude reasoning + tool calls. Use the MCP shim if you want to see zero-touch monitoring of an existing MCP server.
+
+---
+
+## Part 2 — Demo Agent with Claude API
+
+This runs a real Claude (`claude-opus-4-7`) agentic loop. The agent registers itself with AgentSentinel, declares its tool grants, then works through 6 business prompts. Every tool call is automatically intercepted, SHA-256 hashed, and reported — you see anomaly scores in real time.
+
+```
+demo/agent.py  ──────────────────────────────────────────────────────
+                                                                      │
+  Claude ──► tool call ──► SentinelMiddleware ──► POST /api/v1/events │
+                │                                                      │
+                └──► actual tool function (search_crm, etc.)          │
+                                                               AgentSentinel
+```
 
 ### Prerequisites
 
@@ -428,7 +454,7 @@ export SENTINEL_URL=http://localhost:9000
 python demo/agent.py
 ```
 
-You'll see it register itself, add 5 tool grants, then work through 6 realistic prompts using tools like `search_crm`, `read_database`, `http_fetch`, `send_email`, and `write_file`. An anomaly score is printed after each tool call:
+You'll see it register itself, add 5 tool grants, then work through 6 realistic prompts. An anomaly score is printed after each tool call:
 
 ```
 [sentinel] Registered agent: 18dc9b52-...
@@ -443,28 +469,32 @@ You'll see it register itself, add 5 tool grants, then work through 6 realistic 
 [sentinel] Trust score: 46.75 (ALERT)
 ```
 
+The dangerous grants (`send_email`, `write_file`) immediately trigger posture findings — **EXFILTRATION_PATH** and **MISSING_RATE_LIMIT** — which drive the posture score down and push the agent toward CRITICAL.
+
 ### Step 4 — Watch it in the dashboard
 
-Open **http://localhost:5173** — the new agent appears immediately with its trust score, posture findings, and per-tool anomaly history.
+Open **http://localhost:5173** — the agent appears immediately with its trust score, posture findings, and per-tool anomaly history.
 
-> Each run registers a new agent. Run the agent 2–3 times and watch the behavior score improve as the engine builds a baseline — routine tool calls will drop toward `anomaly=0.000`.
+> Run the agent 2–3 times to watch the behavior engine build a baseline. Routine tool calls drop toward `anomaly=0.000` once the engine recognises the pattern.
 
 ---
 
-## Part 3 — Run the MCP Shim (Zero-Touch Monitoring)
+## Part 3 — MCP Shim (Zero-Touch Monitoring)
 
-The MCP shim sits between any MCP client and any MCP server and intercepts every tool call — **the agent and the MCP server need zero code changes**.
+The MCP shim is a transparent proxy. Point it at any existing MCP server and it intercepts every tool call — **the agent and the MCP server need zero code changes**.
 
 ```
-Your Agent  →  MCP Shim :8002  →  Real MCP Server
-                    │
-                    └─►  POST /api/v1/events  →  AgentSentinel
+Your Agent  ──►  MCP Shim :8002  ──►  Real MCP Server
+                      │
+                      └──►  POST /api/v1/events  ──►  AgentSentinel
 ```
+
+In this example we use the official `@modelcontextprotocol/server-filesystem` server (downloaded automatically via `npx`), which exposes 14 real filesystem tools.
 
 ### Prerequisites
 
 - Python 3.11+ (MCP SDK requires 3.11)
-- Node.js 18+ with `npx` (for the filesystem MCP server used in this example)
+- Node.js 18+ with `npx`
 - AgentSentinel running (Part 1 complete)
 
 ### Step 1 — Install dependencies
@@ -493,13 +523,13 @@ PYTHONUNBUFFERED=1 python3.11 demo/mcp_shim.py \
 Wait until you see:
 ```
 [shim] Registered agent   : <uuid> (my-mcp-agent)
-[shim] upstream ready — proxying 14 tools: ['read_file', 'list_directory', ...]
+[shim] upstream ready — proxying 14 tools: ['read_file', 'write_file', 'list_directory', ...]
 [shim] Added 14 tool grants
 [shim] Shim listening on  : http://0.0.0.0:8002/sse
 [shim] ← Point your agent here instead of the real MCP server
 ```
 
-The shim has registered the agent in AgentSentinel and classified all 14 tools (write/edit/create tools are automatically marked as `write` scope).
+The shim registers the agent in AgentSentinel and automatically classifies all 14 tools — `write_file`, `edit_file`, `create_directory`, `move_file` are marked `write` scope; the rest are `read`.
 
 ### Step 4 — Run the test client (Terminal 2)
 
