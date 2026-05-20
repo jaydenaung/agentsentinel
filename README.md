@@ -167,6 +167,59 @@ curl -s http://localhost:9000/api/v1/agents/$AGENT_ID/score | jq .
 
 ---
 
+## Live Demo Agent
+
+The `demo/` directory contains a mini agent that generates real traffic so the behavior engine can build baselines and score anomalies in real time.
+
+```
+demo/
+├── agent.py               # Demo agent — registers, adds grants, runs agentic loop
+└── sentinel_middleware.py # Reusable middleware that auto-reports every tool call
+```
+
+### How it works
+
+`SentinelMiddleware` wraps the Claude agentic loop. Decorate tool functions with `@SentinelTool` and call `mw.run(prompt)` — every tool call is automatically timed, SHA-256 hashed, and reported to AgentSentinel with no manual instrumentation:
+
+```python
+@SentinelTool(
+    description="Search the CRM for customer records.",
+    input_schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+)
+def search_crm(query: str) -> dict:
+    return {"results": [...]}
+
+mw = SentinelMiddleware(
+    anthropic_client=client,
+    sentinel_client=sentinel,
+    agent_id=agent_id,
+    session_id=session_id,
+    tools=[search_crm, ...],
+)
+mw.run("Who are our top enterprise accounts?")
+# → tool call auto-executed, hashed, and POSTed to /api/v1/events
+```
+
+### Run the demo
+
+```bash
+# Install demo dependencies
+pip install anthropic httpx
+
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Make sure the backend is running
+docker compose up -d
+
+python demo/agent.py
+```
+
+The agent registers itself, adds 5 tool grants (including dangerous `send_email` and `write_file` which immediately trigger posture findings), then works through 6 realistic prompts. Anomaly scores are printed after each tool call; trust score is fetched every 3 interactions.
+
+Each run creates a new agent in AgentSentinel — open **http://localhost:5173** to watch scores update in real time.
+
+---
+
 ## Running Tests
 
 ```bash
