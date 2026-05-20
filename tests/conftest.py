@@ -10,9 +10,11 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from agentsentinel.auth import generate_raw_key, hash_key, key_prefix
 from agentsentinel.main import app
 from agentsentinel.models import Base
 from agentsentinel.models.agent import Agent, McpConnection, ToolGrant
+from agentsentinel.models.api_key import ApiKey
 from agentsentinel.models.baseline import Baseline
 from agentsentinel.models.event import AgentEvent
 
@@ -59,8 +61,25 @@ async def sample_agent(db: AsyncSession) -> Agent:
 
 
 @pytest_asyncio.fixture
-async def client(db: AsyncSession):
-    """Async test client with the DB dependency overridden."""
+async def admin_api_key(db: AsyncSession) -> str:
+    """Create a test admin API key and return the plaintext value."""
+    raw = generate_raw_key("admin")
+    key = ApiKey(
+        id=uuid.uuid4(),
+        name="test-admin",
+        key_prefix=key_prefix(raw),
+        key_hash=hash_key(raw),
+        scope="admin",
+        is_active=True,
+    )
+    db.add(key)
+    await db.commit()
+    return raw
+
+
+@pytest_asyncio.fixture
+async def client(db: AsyncSession, admin_api_key: str):
+    """Async test client with the DB dependency overridden and auth header set."""
     from agentsentinel.database import get_db
     from agentsentinel.dependencies import get_redis
 
@@ -76,7 +95,11 @@ async def client(db: AsyncSession):
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_redis] = override_redis
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers={"X-API-Key": admin_api_key},
+    ) as c:
         yield c
 
     app.dependency_overrides.clear()
