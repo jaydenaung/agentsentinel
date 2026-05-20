@@ -73,6 +73,46 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
 
 ---
 
+## Features
+
+### Posture Monitoring
+- Detects over-permissioned agents (write/admin grants on read-only agents)
+- Flags dormant dangerous grants unused for 30+ days
+- Catches data exfiltration paths (internal-read + external-write grant combo)
+- Identifies MCP over-connection (>3 external connections with no agent description)
+- Spots credential scope mismatches (admin grants with zero calls in the last 7 days)
+- Flags dangerous tools with no rate limit configured
+
+### Behavior Monitoring
+- Real-time event ingestion pipeline via Redis Streams
+- Per-agent/tool baseline builder that learns normal call patterns
+- Anomaly scoring with 3-sigma deviation detection
+- First-call and no-baseline detection (new agents start scored conservatively)
+
+### Trust Score
+- Single score per agent: `(Posture × 45%) + (Behavior × 45%) + (Recency × 10%)`
+- Four status bands: **TRUSTED** / **WATCH** / **ALERT** / **CRITICAL**
+- Recomputed on every event — always reflects current state
+
+### Alerting
+- Slack webhook alerts on CRITICAL findings (configure `SLACK_WEBHOOK_URL` in `.env`)
+- Findings feed with severity levels: CRITICAL / HIGH / MEDIUM / LOW
+- Findings can be acknowledged or resolved via the API or dashboard
+
+### API & Authentication
+- REST API with three key scopes: `admin`, `agent`, `readonly`
+- SHA-256 key hashing — plaintext is never stored
+- Bootstrap admin key generated automatically on first startup
+
+### Dashboard
+- Agent list with live trust scores and status badges
+- Agent detail: grants, MCP connections, posture findings, score breakdown
+- Live event feed with anomaly scores and per-agent filter
+- Test event sender for manual demos without a running agent
+- Agent and grant registration forms
+
+---
+
 ## Part 1 — Run AgentSentinel
 
 ### Prerequisites
