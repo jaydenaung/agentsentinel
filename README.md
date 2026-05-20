@@ -73,51 +73,120 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
 
 ---
 
-## Quickstart
+## Part 1 — Run AgentSentinel
+
+### Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed and running
+- [Node.js 18+](https://nodejs.org/) (for the UI)
+- [Git](https://git-scm.com/)
+
+### Step 1 — Clone the repo
 
 ```bash
-git clone <repo>
+git clone https://github.com/jaydenaung/agentsentinel.git
 cd agentsentinel
-cp .env.example .env
-
-# Generate a self-signed TLS certificate (first time only)
-./nginx/generate-certs.sh
-
-docker compose up
 ```
 
-The API is available at **https://localhost/api/v1/** (via Nginx) or **http://localhost:9000** (direct, dev only). Interactive docs at https://localhost/docs.
+### Step 2 — Create your `.env` file
 
-Run migrations (first time or after pulls):
+```bash
+cp .env.example .env
+```
+
+Leave it as-is for now — you'll add the API key in Step 6.
+
+### Step 3 — Generate a TLS certificate (first time only)
+
+```bash
+./nginx/generate-certs.sh
+```
+
+This creates a self-signed cert in `nginx/certs/`. Your browser will show a warning the first time — that's expected for self-signed certs.
+
+### Step 4 — Start the backend
+
+```bash
+docker compose up -d
+```
+
+This starts Postgres, Redis, the FastAPI server, the background worker, and Nginx. Wait about 10 seconds for Postgres to initialise.
+
+### Step 5 — Run database migrations
 
 ```bash
 docker compose exec api alembic upgrade head
 ```
 
-**Bootstrap API key** — on first startup, AgentSentinel automatically creates an admin key and prints it to the API container logs:
-
+You should see:
 ```
-╔══════════════════════════════════════════════════════╗
-║  AgentSentinel bootstrap admin key (shown once)      ║
-║  as_adm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...   ║
-╚══════════════════════════════════════════════════════╝
+INFO  Running upgrade 0001 -> 0002, Add api_keys table...
 ```
 
-Copy it and add it to your `.env`:
+### Step 6 — Get your API key
+
+Restart the API to trigger the bootstrap key:
 
 ```bash
-AGENTSENTINEL_API_KEY=as_adm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+docker compose restart api
 ```
 
-This key is required for all API calls after the first startup.
-
-**Start the UI** (separate terminal):
+Wait 5 seconds, then grab the key from the logs:
 
 ```bash
-cd ui && npm install && npm run dev
+docker compose logs api | grep "as_adm_"
 ```
 
-Open **http://localhost:5173** — the UI proxies all `/api` requests to the backend.
+You'll see a line like:
+```
+"key": "as_adm_REDACTED_KEY_ROTATED"
+```
+
+Copy it and add it to your `.env` file:
+
+```bash
+# In .env:
+AGENTSENTINEL_API_KEY=as_adm_<your-key-here>
+```
+
+Also export it in your shell so you can use it in commands:
+
+```bash
+export AGENTSENTINEL_API_KEY=as_adm_<your-key-here>
+```
+
+### Step 7 — Verify the backend is working
+
+```bash
+curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
+  http://localhost:9000/api/v1/agents | jq .
+```
+
+Expected: `[]` (empty list — no agents yet). If you get a 200 response, the backend is healthy.
+
+### Step 8 — Set up the UI
+
+Create `ui/.env` with your API key so the dashboard can authenticate:
+
+```bash
+echo "VITE_API_KEY=$AGENTSENTINEL_API_KEY" > ui/.env
+```
+
+### Step 9 — Start the UI
+
+In a **new terminal**:
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+### Step 10 — Open the dashboard
+
+Open **http://localhost:5173** in your browser.
+
+You'll see the AgentSentinel dashboard. It's empty for now — the next section shows you how to get agents appearing with live trust scores.
 
 ---
 
@@ -259,162 +328,185 @@ curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
 
 ---
 
-## Live Demo Agent
+## Part 2 — Run the Demo Agent (Claude API)
 
-The `demo/` directory contains a mini agent that generates real traffic so the behavior engine can build baselines and score anomalies in real time.
+This runs a real Claude agentic loop that registers itself with AgentSentinel and auto-reports every tool call. No MCP required — uses the Anthropic API directly.
 
-```
-demo/
-├── agent.py               # Standalone demo agent — registers with AgentSentinel,
-│                          #   adds tool grants, runs a 6-prompt Claude agentic loop
-├── sentinel_middleware.py # Reusable middleware — @SentinelTool decorator +
-│                          #   SentinelMiddleware class that auto-intercepts every
-│                          #   tool call, hashes I/O, and reports to AgentSentinel
-├── mcp_shim.py            # MCP shim — transparent SSE proxy that sits between any
-│                          #   MCP client and any MCP server (stdio or SSE) and
-│                          #   auto-reports every tool call; zero agent code changes
-├── test_shim.py           # Test client — connects to the shim, exercises tools,
-│                          #   and prints the resulting AgentSentinel trust score
-└── requirements.txt       # anthropic, httpx, mcp, uvicorn, starlette
-```
+### Prerequisites
 
-### How it works
+- Python 3.10+
+- An [Anthropic API key](https://console.anthropic.com/)
+- AgentSentinel running (Part 1 complete)
 
-`SentinelMiddleware` wraps the Claude agentic loop. Decorate tool functions with `@SentinelTool` and call `mw.run(prompt)` — every tool call is automatically timed, SHA-256 hashed, and reported to AgentSentinel with no manual instrumentation:
-
-```python
-@SentinelTool(
-    description="Search the CRM for customer records.",
-    input_schema={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-)
-def search_crm(query: str) -> dict:
-    return {"results": [...]}
-
-mw = SentinelMiddleware(
-    anthropic_client=client,
-    sentinel_client=sentinel,
-    agent_id=agent_id,
-    session_id=session_id,
-    tools=[search_crm, ...],
-)
-mw.run("Who are our top enterprise accounts?")
-# → tool call auto-executed, hashed, and POSTed to /api/v1/events
-```
-
-### Run the demo
+### Step 1 — Install dependencies
 
 ```bash
-# Install demo dependencies
 pip install anthropic httpx
+```
 
+### Step 2 — Set environment variables
+
+```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-export AGENTSENTINEL_API_KEY=as_adm_...   # bootstrap key from docker compose logs
+export AGENTSENTINEL_API_KEY=as_adm_...    # your bootstrap key from Part 1
+export SENTINEL_URL=http://localhost:9000
+```
 
-# Make sure the backend is running
-docker compose up -d
+### Step 3 — Run the agent
 
+```bash
 python demo/agent.py
 ```
 
-The agent registers itself, adds 5 tool grants (including dangerous `send_email` and `write_file` which immediately trigger posture findings), then works through 6 realistic prompts. Anomaly scores are printed after each tool call; trust score is fetched every 3 interactions.
+You'll see it register itself, add 5 tool grants, then work through 6 realistic prompts using tools like `search_crm`, `read_database`, `http_fetch`, `send_email`, and `write_file`. An anomaly score is printed after each tool call:
 
-Each run creates a new agent in AgentSentinel — open **http://localhost:5173** to watch scores update in real time.
+```
+[sentinel] Registered agent: 18dc9b52-...
+[sentinel] Added 5 tool grants
+
+════════════════════════════════════════════════════════════
+[1/6] User: Who are our top 5 enterprise accounts by MRR?
+════════════════════════════════════════════════════════════
+  → tool=search_crm    anomaly=0.900 ⚠️
+  → tool=read_database anomaly=0.700 ⚠️
+...
+[sentinel] Trust score: 46.75 (ALERT)
+```
+
+### Step 4 — Watch it in the dashboard
+
+Open **http://localhost:5173** — the new agent appears immediately with its trust score, posture findings, and per-tool anomaly history.
+
+> Each run registers a new agent. Run the agent 2–3 times and watch the behavior score improve as the engine builds a baseline — routine tool calls will drop toward `anomaly=0.000`.
 
 ---
 
-## MCP Shim (Zero-Touch Monitoring)
+## Part 3 — Run the MCP Shim (Zero-Touch Monitoring)
 
-`demo/mcp_shim.py` is a transparent MCP proxy. Point it at any existing MCP server and it intercepts every tool call — the agent and the real MCP server need **zero code changes**.
+The MCP shim sits between any MCP client and any MCP server and intercepts every tool call — **the agent and the MCP server need zero code changes**.
 
 ```
-Agent  →  MCP Shim (port 8002)  →  Real MCP Server
-                │
-                └─► POST /api/v1/events  →  AgentSentinel
+Your Agent  →  MCP Shim :8002  →  Real MCP Server
+                    │
+                    └─►  POST /api/v1/events  →  AgentSentinel
 ```
 
-### Run the shim
+### Prerequisites
+
+- Python 3.11+ (MCP SDK requires 3.11)
+- Node.js 18+ with `npx` (for the filesystem MCP server used in this example)
+- AgentSentinel running (Part 1 complete)
+
+### Step 1 — Install dependencies
 
 ```bash
 pip install -r demo/requirements.txt
 ```
 
-The shim requires an API key with `admin` scope (to register agents) or an existing `agent_id` plus an `agent`-scope key.
+### Step 2 — Set environment variable
 
 ```bash
-export AGENTSENTINEL_API_KEY=as_adm_...   # or pass --api-key on the command line
+export AGENTSENTINEL_API_KEY=as_adm_...    # your bootstrap key from Part 1
 ```
 
-**Against a stdio MCP server** (tested — uses the official filesystem MCP server via npx):
+### Step 3 — Start the shim (Terminal 1)
+
+Leave this terminal open — the shim keeps running and proxies all tool calls.
 
 ```bash
-PYTHONUNBUFFERED=1 python demo/mcp_shim.py \
+PYTHONUNBUFFERED=1 python3.11 demo/mcp_shim.py \
     --upstream-cmd "npx -y @modelcontextprotocol/server-filesystem /tmp" \
-    --agent-name "my-filesystem-agent" \
+    --agent-name "my-mcp-agent" \
     --port 8002
 ```
 
-Expected startup output:
+Wait until you see:
 ```
-[shim] Registered agent   : <uuid> (my-filesystem-agent)
+[shim] Registered agent   : <uuid> (my-mcp-agent)
 [shim] upstream ready — proxying 14 tools: ['read_file', 'list_directory', ...]
 [shim] Added 14 tool grants
 [shim] Shim listening on  : http://0.0.0.0:8002/sse
 [shim] ← Point your agent here instead of the real MCP server
 ```
 
-**Against an SSE MCP server** (remote or local):
+The shim has registered the agent in AgentSentinel and classified all 14 tools (write/edit/create tools are automatically marked as `write` scope).
 
-```bash
-PYTHONUNBUFFERED=1 python demo/mcp_shim.py \
-    --upstream-url http://localhost:8001/sse \
-    --agent-name "my-rag-agent" \
-    --port 8002
-```
-
-Then change one line in your agent config:
-
-```diff
-- mcp_server_url = "http://localhost:8001/sse"
-+ mcp_server_url = "http://localhost:8002/sse"
-```
-
-### Test the shim
-
-With the shim running, use the included test client to verify interception end-to-end (set `AGENTSENTINEL_API_KEY` so it can query AgentSentinel):
+### Step 4 — Run the test client (Terminal 2)
 
 ```bash
 export AGENTSENTINEL_API_KEY=as_adm_...
-python demo/test_shim.py
+python3.11 demo/test_shim.py
 ```
 
-It connects to the shim, lists proxied tools, makes several tool calls, then fetches and prints the AgentSentinel trust score. Each intercepted call appears in the shim log with its anomaly score:
+The test client connects to the shim, lists all proxied tools, makes several tool calls, then prints the trust score:
 
 ```
-[shim] tool=list_directory       anomaly=0.500
-[shim] tool=get_file_info        anomaly=0.500
-[shim] tool=search_files         anomaly=0.500
+Tools available via shim (14):
+  • read_file, write_file, edit_file, list_directory ...
+
+Calling list_directory({"path": "/tmp"}) ...
+Calling get_file_info({"path": "/tmp"}) ...
+Calling search_files({"path": "/tmp", "pattern": "*.txt"}) ...
+
+Latest agent : my-mcp-agent (<uuid>)
+Fresh score  : 59.5 (ALERT)
 ```
 
-> **Note:** Anomaly scores start high (~0.9) for a brand-new agent with no baseline. After 20–30 calls the behavior engine builds a normal pattern and scores for routine calls drop toward 0.0–0.3. Unusual tools or call sequences score higher.
+Back in Terminal 1 you'll see the anomaly score for each intercepted call:
+
+```
+[shim] tool=list_directory       anomaly=0.900 ⚠️
+[shim] tool=get_file_info        anomaly=0.900 ⚠️
+[shim] tool=search_files         anomaly=0.900 ⚠️
+```
+
+### Step 5 — Watch it in the dashboard
+
+Open **http://localhost:5173** — your MCP agent appears with its trust score, write-scoped tool grants, and live anomaly scores.
+
+> Scores start high (~0.9) for a brand-new agent with no baseline. Run the test client a few more times and watch routine calls drop toward `0.0`.
 
 ### Reuse an existing agent
 
-To avoid registering a new agent on every shim restart, pass the agent UUID instead of a name:
+To keep the same agent across shim restarts, pass its UUID instead of a name:
 
 ```bash
-python demo/mcp_shim.py \
+PYTHONUNBUFFERED=1 python3.11 demo/mcp_shim.py \
     --upstream-cmd "npx -y @modelcontextprotocol/server-filesystem /tmp" \
     --agent-id <uuid-from-agentsentinel> \
     --port 8002
 ```
 
-### What the shim does automatically
+### Connect your own MCP server
 
-- Registers a new agent in AgentSentinel (or reuses one with `--agent-id`)
-- Discovers and registers grants for every tool the upstream server exposes
-- Proxies `tools/list` and `tools/call` transparently to the real server
-- SHA-256 hashes every input/output before reporting (raw content never leaves the process)
-- Reports to AgentSentinel async — no latency added to tool calls
+Replace `--upstream-cmd` with `--upstream-url` to point at any remote SSE MCP server:
+
+```bash
+PYTHONUNBUFFERED=1 python3.11 demo/mcp_shim.py \
+    --upstream-url http://your-mcp-server:8001/sse \
+    --agent-name "my-rag-agent" \
+    --port 8002
+```
+
+Then change one line in your agent config to point at the shim instead:
+
+```diff
+- mcp_server_url = "http://your-mcp-server:8001/sse"
++ mcp_server_url = "http://localhost:8002/sse"
+```
+
+---
+
+## Demo Files
+
+```
+demo/
+├── agent.py               # Standalone demo agent (Part 2)
+├── sentinel_middleware.py # @SentinelTool decorator + SentinelMiddleware class
+├── mcp_shim.py            # Transparent MCP proxy (Part 3)
+├── test_shim.py           # Test client for the shim
+└── requirements.txt       # anthropic, httpx, mcp, uvicorn, starlette
+```
 
 ---
 
