@@ -190,6 +190,76 @@ You'll see the AgentSentinel dashboard. It's empty for now — the next section 
 
 ---
 
+## Shutdown & Reset
+
+### Graceful shutdown (keeps all data)
+
+Stops all containers but leaves the Postgres volume intact. Everything picks up exactly where it left off on the next `docker compose up`.
+
+```bash
+# Stop all containers
+docker compose down
+
+# Stop the UI (Ctrl+C in the terminal running npm run dev, or:)
+pkill -f "vite"
+```
+
+To bring everything back up:
+
+```bash
+docker compose up -d
+cd ui && npm run dev
+```
+
+---
+
+### Soft reset (wipe agents, keep API key)
+
+Clears all agents, events, findings, and baselines from the database — but keeps your API key so you don't need to reconfigure anything. Use this to start a clean demo run without a full teardown.
+
+```bash
+docker compose exec postgres psql -U agentsentinel -d agentsentinel -c "
+TRUNCATE TABLE agent_events, findings, baselines, tool_grants, mcp_connections, agents RESTART IDENTITY CASCADE;
+"
+```
+
+Verify it's clean:
+
+```bash
+curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
+  http://localhost:9000/api/v1/agents | jq length
+# → 0
+```
+
+---
+
+### Hard reset (wipe everything including API key)
+
+Destroys the Postgres volume entirely — clean slate, new bootstrap key required.
+
+```bash
+# 1. Stop containers and delete the volume
+docker compose down -v
+
+# 2. Restart
+docker compose up -d
+
+# 3. Run migrations
+docker compose exec api alembic upgrade head
+
+# 4. Get your new bootstrap API key
+docker compose logs api | grep "as_adm_"
+
+# 5. Update your .env and ui/.env with the new key
+#    AGENTSENTINEL_API_KEY=as_adm_<new-key>
+#    VITE_API_KEY=as_adm_<new-key>
+
+# 6. Restart the UI to pick up the new key
+pkill -f "vite" && cd ui && npm run dev
+```
+
+---
+
 ## Authentication
 
 All API endpoints require an `X-API-Key` header. Three scopes exist:
