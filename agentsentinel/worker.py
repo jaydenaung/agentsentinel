@@ -1,18 +1,41 @@
 """Background worker — recomputes baselines for all active agents every 5 minutes."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from agentsentinel.behavior.baseline import compute_baseline
 from agentsentinel.database import AsyncSessionLocal
-from agentsentinel.models.agent import Agent
+from agentsentinel.models.agent import ToolGrant
 from agentsentinel.models.event import AgentEvent
 
 log = structlog.get_logger(__name__)
 
 INTERVAL_SECONDS = 300  # 5 minutes
+
+
+async def _refresh_grant_counts(db) -> None:
+    """Recalculate call_count_7d for all ToolGrants from actual events in the last 7 days."""
+    cutoff = datetime.now(tz=timezone.utc) - timedelta(days=7)
+
+    count_result = await db.execute(
+        select(AgentEvent.agent_id, AgentEvent.tool_name, func.count().label("cnt"))
+        .where(AgentEvent.timestamp >= cutoff)
+        .group_by(AgentEvent.agent_id, AgentEvent.tool_name)
+    )
+    count_map = {(row.agent_id, row.tool_name): row.cnt for row in count_result.all()}
+
+    grants_result = await db.execute(select(ToolGrant))
+    updated = 0
+    for grant in grants_result.scalars().all():
+        new_count = count_map.get((grant.agent_id, grant.tool_name), 0)
+        if grant.call_count_7d != new_count:
+            grant.call_count_7d = new_count
+            updated += 1
+
+    log.info("worker.grant_counts_refreshed", updated=updated)
 
 
 async def run_once() -> None:
@@ -36,6 +59,7 @@ async def run_once() -> None:
                         error=str(exc),
                     )
 
+            await _refresh_grant_counts(db)
             await db.commit()
             log.info("worker.baseline_run_complete", pair_count=len(pairs))
         except Exception as exc:

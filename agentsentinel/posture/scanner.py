@@ -6,6 +6,7 @@ import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agentsentinel.alerts.slack import send_critical_alert
 from agentsentinel.models.agent import Agent, McpConnection, ToolGrant
 from agentsentinel.models.finding import Finding
 from agentsentinel.posture.rules import run_all_rules
@@ -45,4 +46,9 @@ async def run_posture_scan(agent_id: uuid.UUID, db: AsyncSession) -> int:
 
     score = calculate_posture_score(findings)
     log.info("posture_scan.complete", agent_id=str(agent_id), score=score, findings=len(findings))
+
+    for f in findings:
+        if f.severity == "CRITICAL":
+            await send_critical_alert(f, agent.name)
+
     return score
