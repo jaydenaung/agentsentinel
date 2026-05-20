@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from agentsentinel.auth import require_admin, require_read
 from agentsentinel.database import get_db
 from agentsentinel.models.agent import Agent, McpConnection, ToolGrant
 from agentsentinel.schemas.agent import (
@@ -25,7 +26,8 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 log = structlog.get_logger(__name__)
 
 
-@router.post("", response_model=AgentResponse, status_code=201)
+@router.post("", response_model=AgentResponse, status_code=201,
+             dependencies=[Depends(require_admin)])
 async def create_agent(
     body: AgentCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -38,7 +40,8 @@ async def create_agent(
     return agent
 
 
-@router.get("", response_model=list[AgentResponse])
+@router.get("", response_model=list[AgentResponse],
+            dependencies=[Depends(require_read)])
 async def list_agents(
     db: Annotated[AsyncSession, Depends(get_db)],
     status: Annotated[str | None, Query()] = None,
@@ -54,7 +57,8 @@ async def list_agents(
     return list(result.scalars().all())
 
 
-@router.get("/{agent_id}", response_model=AgentDetailResponse)
+@router.get("/{agent_id}", response_model=AgentDetailResponse,
+            dependencies=[Depends(require_read)])
 async def get_agent(
     agent_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -71,7 +75,8 @@ async def get_agent(
     return agent
 
 
-@router.post("/{agent_id}/grants", response_model=ToolGrantResponse, status_code=201)
+@router.post("/{agent_id}/grants", response_model=ToolGrantResponse, status_code=201,
+             dependencies=[Depends(require_admin)])
 async def add_grant(
     agent_id: uuid.UUID,
     body: ToolGrantCreate,
@@ -87,7 +92,8 @@ async def add_grant(
     return grant
 
 
-@router.post("/{agent_id}/mcp", response_model=McpConnectionResponse, status_code=201)
+@router.post("/{agent_id}/mcp", response_model=McpConnectionResponse, status_code=201,
+             dependencies=[Depends(require_admin)])
 async def add_mcp_connection(
     agent_id: uuid.UUID,
     body: McpConnectionCreate,

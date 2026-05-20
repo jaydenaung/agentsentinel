@@ -23,6 +23,7 @@ from sentinel_middleware import SentinelMiddleware, SentinelTool
 # ── Config ────────────────────────────────────────────────────────────────────
 SENTINEL_URL = os.getenv("SENTINEL_URL", "http://localhost:9000")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+AGENTSENTINEL_API_KEY = os.getenv("AGENTSENTINEL_API_KEY", "")
 SESSION_ID = f"demo-{uuid.uuid4().hex[:8]}"
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -118,8 +119,9 @@ def write_file(path: str, content: str) -> dict:
 # ── AgentSentinel client ──────────────────────────────────────────────────────
 
 class SentinelClient:
-    def __init__(self, base_url: str):
-        self._http = httpx.Client(base_url=base_url.rstrip("/"), timeout=10)
+    def __init__(self, base_url: str, api_key: str = ""):
+        headers = {"X-API-Key": api_key} if api_key else {}
+        self._http = httpx.Client(base_url=base_url.rstrip("/"), timeout=10, headers=headers)
 
     def register_agent(self) -> str:
         r = self._http.post("/api/v1/agents", json={
@@ -178,8 +180,11 @@ def main():
     if not ANTHROPIC_API_KEY:
         print("ERROR: Set ANTHROPIC_API_KEY environment variable.")
         sys.exit(1)
+    if not AGENTSENTINEL_API_KEY:
+        print("ERROR: Set AGENTSENTINEL_API_KEY environment variable.")
+        sys.exit(1)
 
-    sentinel = SentinelClient(SENTINEL_URL)
+    sentinel = SentinelClient(SENTINEL_URL, api_key=AGENTSENTINEL_API_KEY)
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     print(f"[demo] AgentSentinel URL : {SENTINEL_URL}")

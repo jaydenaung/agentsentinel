@@ -89,12 +89,14 @@ class SentinelMCPShim:
         sentinel_url: str,
         agent_id: str,
         session_id: str,
+        api_key: str = "",
         upstream_url: str | None = None,
         upstream_cmd: str | None = None,
     ) -> None:
         self.sentinel_url = sentinel_url.rstrip("/")
         self.agent_id = agent_id
         self.session_id = session_id
+        self._auth_headers = {"X-API-Key": api_key} if api_key else {}
         self.upstream_url = upstream_url
         self.upstream_cmd = upstream_cmd
 
@@ -186,7 +188,7 @@ class SentinelMCPShim:
         self, tool_name: str, input_hash: str, output_hash: str, duration_ms: int
     ) -> None:
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, headers=self._auth_headers) as client:
                 r = await client.post(
                     f"{self.sentinel_url}/api/v1/events",
                     json={
@@ -231,23 +233,27 @@ class SentinelMCPShim:
 # ── AgentSentinel registration helpers ───────────────────────────────────────
 
 def register_agent(
-    sentinel_url: str, name: str, model: str, team: str, description: str
+    sentinel_url: str, name: str, model: str, team: str, description: str, api_key: str = ""
 ) -> str:
+    headers = {"X-API-Key": api_key} if api_key else {}
     r = httpx.post(
         f"{sentinel_url}/api/v1/agents",
         json={"name": name, "agent_type": "llm_agent", "model": model,
               "owner_team": team, "description": description},
+        headers=headers,
         timeout=10,
     )
     r.raise_for_status()
     return r.json()["id"]
 
 
-def add_grants(sentinel_url: str, agent_id: str, tools: list[Tool]) -> None:
+def add_grants(sentinel_url: str, agent_id: str, tools: list[Tool], api_key: str = "") -> None:
+    headers = {"X-API-Key": api_key} if api_key else {}
     for tool in tools:
         httpx.post(
             f"{sentinel_url}/api/v1/agents/{agent_id}/grants",
             json={"tool_name": tool.name, "scope": "read", "is_dangerous": False},
+            headers=headers,
             timeout=10,
         ).raise_for_status()
 
@@ -277,6 +283,7 @@ def parse_args() -> argparse.Namespace:
     agent.add_argument("--agent-name", metavar="NAME", help="Register a new agent with this name")
 
     p.add_argument("--sentinel-url", default=os.getenv("SENTINEL_URL", "http://localhost:9000"))
+    p.add_argument("--api-key", default=os.getenv("AGENTSENTINEL_API_KEY", ""), help="AgentSentinel API key")
     p.add_argument("--team", default="platform-eng", help="Owner team (used when registering)")
     p.add_argument("--model", default="claude-opus-4-7", help="Model label (used when registering)")
     p.add_argument("--description", default="Agent monitored via AgentSentinel MCP shim")
@@ -287,6 +294,7 @@ def parse_args() -> argparse.Namespace:
 
 async def main_async(args: argparse.Namespace) -> None:
     sentinel_url = args.sentinel_url
+    api_key = args.api_key
     session_id = f"shim-{uuid.uuid4().hex[:8]}"
 
     # Resolve agent ID — register or reuse
@@ -300,6 +308,7 @@ async def main_async(args: argparse.Namespace) -> None:
             model=args.model,
             team=args.team,
             description=args.description,
+            api_key=api_key,
         )
         print(f"[shim] Registered agent   : {agent_id} ({args.agent_name})")
 
@@ -308,6 +317,7 @@ async def main_async(args: argparse.Namespace) -> None:
         sentinel_url=sentinel_url,
         agent_id=agent_id,
         session_id=session_id,
+        api_key=api_key,
         upstream_url=args.upstream_url,
         upstream_cmd=args.upstream_cmd,
     )
@@ -315,7 +325,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
     # Auto-register grants for every tool the upstream exposes
     if args.agent_name:  # only when we just registered fresh
-        add_grants(sentinel_url, agent_id, shim._cached_tools)
+        add_grants(sentinel_url, agent_id, shim._cached_tools, api_key=api_key)
         print(f"[shim] Added {len(shim._cached_tools)} tool grants")
 
     print(f"[shim] Sentinel URL       : {sentinel_url}")

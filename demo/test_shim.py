@@ -13,12 +13,15 @@ Usage (run AFTER the shim is already running on port 8002):
 import asyncio
 import json
 
+import os
+
 import httpx
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
 SHIM_URL = "http://localhost:8002/sse"
 SENTINEL_URL = "http://localhost:9000"
+AGENTSENTINEL_API_KEY = os.getenv("AGENTSENTINEL_API_KEY", "")
 
 
 async def run():
@@ -53,7 +56,8 @@ async def run():
     # Fetch events from AgentSentinel to confirm they were recorded
     print("─" * 50)
     print("Checking AgentSentinel for registered agents ...")
-    async with httpx.AsyncClient(timeout=10) as client:
+    headers = {"X-API-Key": AGENTSENTINEL_API_KEY} if AGENTSENTINEL_API_KEY else {}
+    async with httpx.AsyncClient(timeout=10, headers=headers) as client:
         r = await client.get(f"{SENTINEL_URL}/api/v1/agents")
         agents = r.json()
         # Show the most recently created agent (the one the shim registered)

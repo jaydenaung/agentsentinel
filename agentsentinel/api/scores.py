@@ -7,6 +7,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agentsentinel.auth import require_read
 from agentsentinel.database import get_db
 from agentsentinel.models.agent import Agent
 from agentsentinel.trust.engine import compute_trust_score
@@ -15,7 +16,7 @@ router = APIRouter(tags=["scores"])
 log = structlog.get_logger(__name__)
 
 
-@router.get("/agents/{agent_id}/score")
+@router.get("/agents/{agent_id}/score", dependencies=[Depends(require_read)])
 async def get_trust_score(
     agent_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],

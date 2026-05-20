@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agentsentinel.auth import require_admin, require_read
 from agentsentinel.database import get_db
 from agentsentinel.models.finding import Finding
 from agentsentinel.schemas.finding import FindingResponse, FindingStatusUpdate
@@ -19,7 +20,8 @@ log = structlog.get_logger(__name__)
 _VALID_STATUSES = {"OPEN", "ACKNOWLEDGED", "RESOLVED"}
 
 
-@router.get("/agents/{agent_id}/findings", response_model=list[FindingResponse])
+@router.get("/agents/{agent_id}/findings", response_model=list[FindingResponse],
+            dependencies=[Depends(require_read)])
 async def list_findings(
     agent_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -37,7 +39,8 @@ async def list_findings(
     return list(result.scalars().all())
 
 
-@router.patch("/findings/{finding_id}", response_model=FindingResponse)
+@router.patch("/findings/{finding_id}", response_model=FindingResponse,
+              dependencies=[Depends(require_admin)])
 async def update_finding_status(
     finding_id: uuid.UUID,
     body: FindingStatusUpdate,

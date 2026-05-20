@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agentsentinel.auth import require_agent
 from agentsentinel.behavior.anomaly import score_event
 from agentsentinel.behavior.collector import ingest_event
 from agentsentinel.database import get_db
@@ -18,7 +19,8 @@ router = APIRouter(prefix="/events", tags=["events"])
 log = structlog.get_logger(__name__)
 
 
-@router.post("", response_model=EventResponse, status_code=201)
+@router.post("", response_model=EventResponse, status_code=201,
+             dependencies=[Depends(require_agent)])
 async def ingest(
     body: EventIngest,
     db: Annotated[AsyncSession, Depends(get_db)],
