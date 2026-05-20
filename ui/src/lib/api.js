@@ -34,6 +34,10 @@ export const api = {
     },
   },
   events: {
+    list: (params = {}) => {
+      const qs = new URLSearchParams(params).toString()
+      return req(`/events${qs ? '?' + qs : ''}`)
+    },
     ingest: (body) => req('/events', { method: 'POST', body: JSON.stringify(body) }),
   },
   findings: {

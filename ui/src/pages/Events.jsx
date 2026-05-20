@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { api } from '../lib/api'
 import { fmtAgo } from '../lib/utils'
@@ -21,49 +21,59 @@ function AnomalyBar({ score }) {
 
 export default function Events() {
   const [events, setEvents] = useState([])
-  const [agents, setAgents] = useState({})
+  const [agentList, setAgentList] = useState([])
+  const [filterAgent, setFilterAgent] = useState('')
   const [sending, setSending] = useState(false)
   const [autoRefresh, setAutoRefresh] = useState(false)
+  const [loading, setLoading] = useState(true)
   const [form, setForm] = useState({ agent_id: '', tool_name: '', duration_ms: '', session_id: '' })
   const [result, setResult] = useState(null)
-  const [agentList, setAgentList] = useState([])
   const intervalRef = useRef(null)
   const navigate = useNavigate()
+
+  const loadEvents = useCallback(async () => {
+    try {
+      const params = { limit: 100 }
+      if (filterAgent) params.agent_id = filterAgent
+      const data = await api.events.list(params)
+      setEvents(data)
+    } catch (err) {
+      console.error('Failed to load events', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [filterAgent])
 
   async function loadAgents() {
     const list = await api.agents.list()
     setAgentList(list)
-    const map = {}
-    list.forEach(a => { map[a.id] = a })
-    setAgents(map)
     if (list.length > 0 && !form.agent_id) {
       setForm(f => ({ ...f, agent_id: list[0].id }))
     }
   }
-
-  // Simulate loading recent events by querying each agent's findings-adjacent data
-  // (real event list endpoint would be added in Phase 2 — for now we store locally)
-  const [localEvents, setLocalEvents] = useState([])
 
   useEffect(() => {
     loadAgents()
   }, [])
 
   useEffect(() => {
+    loadEvents()
+  }, [loadEvents])
+
+  useEffect(() => {
     if (autoRefresh) {
-      intervalRef.current = setInterval(() => loadAgents(), 5000)
+      intervalRef.current = setInterval(loadEvents, 5000)
     } else {
       clearInterval(intervalRef.current)
     }
     return () => clearInterval(intervalRef.current)
-  }, [autoRefresh])
+  }, [autoRefresh, loadEvents])
 
   async function sendEvent(e) {
     e.preventDefault()
     setSending(true)
     setResult(null)
     try {
-      // Hash the tool name as a proxy for input/output content
       const encoder = new TextEncoder()
       const buf = await crypto.subtle.digest('SHA-256', encoder.encode(form.tool_name + Date.now()))
       const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
@@ -79,14 +89,7 @@ export default function Events() {
         session_id: form.session_id || null,
       })
       setResult(res)
-      const agent = agents[form.agent_id]
-      setLocalEvents(prev => [{
-        ...res,
-        tool_name: form.tool_name,
-        agent_name: agent?.name ?? form.agent_id,
-        agent_id: form.agent_id,
-        _at: new Date().toISOString(),
-      }, ...prev].slice(0, 50))
+      await loadEvents()
     } catch (err) {
       setResult({ error: err.message })
     } finally {
@@ -173,12 +176,26 @@ export default function Events() {
         {/* Event feed */}
         <div className="lg:col-span-3">
           <div className="rounded-lg border border-slate-800 bg-slate-900/30 overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-              <h2 className="text-sm font-medium text-slate-200">
+            <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between gap-3">
+              <h2 className="text-sm font-medium text-slate-200 shrink-0">
                 Event Feed
-                <span className="ml-2 text-slate-500 font-normal text-xs">({localEvents.length})</span>
+                <span className="ml-2 text-slate-500 font-normal text-xs">({events.length})</span>
               </h2>
-              <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+
+              {/* Agent filter */}
+              <select
+                className="flex-1 max-w-[180px] px-2 py-1 rounded border border-slate-700 bg-slate-800/60 text-slate-300 text-xs focus:outline-none focus:border-violet-500/60 cursor-pointer"
+                value={filterAgent}
+                onChange={e => setFilterAgent(e.target.value)}
+              >
+                <option value="">All agents</option>
+                {agentList.map(a => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </select>
+
+              {/* Live toggle */}
+              <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer shrink-0">
                 <div
                   onClick={() => setAutoRefresh(r => !r)}
                   className={`w-8 h-4 rounded-full transition-colors cursor-pointer ${autoRefresh ? 'bg-violet-500' : 'bg-slate-700'} relative`}
@@ -189,10 +206,12 @@ export default function Events() {
               </label>
             </div>
 
-            {localEvents.length === 0 ? (
+            {loading ? (
+              <div className="py-16 text-center text-slate-500 text-sm">Loading…</div>
+            ) : events.length === 0 ? (
               <div className="py-16 text-center text-slate-500 text-sm">
                 <p>No events yet.</p>
-                <p className="mt-1 text-xs">Send a test event using the form.</p>
+                <p className="mt-1 text-xs">Run the demo agent or send a test event.</p>
               </div>
             ) : (
               <div className="overflow-auto max-h-[480px]">
@@ -206,17 +225,16 @@ export default function Events() {
                     </tr>
                   </thead>
                   <tbody>
-                    {localEvents.map((ev, i) => (
+                    {events.map((ev, i) => (
                       <tr
                         key={ev.event_id}
-                        className={`border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors cursor-pointer
-                          ${i === 0 ? 'bg-violet-500/5' : ''}`}
+                        className={`border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors cursor-pointer ${i === 0 ? 'bg-violet-500/5' : ''}`}
                         onClick={() => navigate(`/agents/${ev.agent_id}`)}
                       >
-                        <td className="px-4 py-2.5 text-slate-300">{ev.agent_name}</td>
+                        <td className="px-4 py-2.5 text-slate-300 max-w-[120px] truncate">{ev.agent_name}</td>
                         <td className="px-4 py-2.5 font-mono text-xs text-slate-400">{ev.tool_name}</td>
                         <td className="px-4 py-2.5"><AnomalyBar score={ev.anomaly_score} /></td>
-                        <td className="px-4 py-2.5 text-xs text-slate-500">{fmtAgo(ev._at)}</td>
+                        <td className="px-4 py-2.5 text-xs text-slate-500 whitespace-nowrap">{fmtAgo(ev.timestamp)}</td>
                       </tr>
                     ))}
                   </tbody>

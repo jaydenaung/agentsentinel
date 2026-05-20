@@ -1,22 +1,57 @@
-"""Event ingestion endpoint."""
+"""Event ingestion and listing endpoints."""
 
+import uuid
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from redis.asyncio import Redis
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agentsentinel.auth import require_agent
+from agentsentinel.auth import require_agent, require_read
 from agentsentinel.behavior.anomaly import score_event
 from agentsentinel.behavior.collector import ingest_event
 from agentsentinel.database import get_db
 from agentsentinel.dependencies import get_redis
 from agentsentinel.models.agent import Agent
-from agentsentinel.schemas.event import EventIngest, EventResponse
+from agentsentinel.models.event import AgentEvent
+from agentsentinel.schemas.event import EventIngest, EventListItem, EventResponse
 
 router = APIRouter(prefix="/events", tags=["events"])
 log = structlog.get_logger(__name__)
+
+
+@router.get("", response_model=list[EventListItem], dependencies=[Depends(require_read)])
+async def list_events(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    agent_id: uuid.UUID | None = Query(default=None),
+    limit: int = Query(default=50, le=200),
+) -> list[EventListItem]:
+    """Return the most recent tool-call events, newest first."""
+    stmt = (
+        select(AgentEvent, Agent.name.label("agent_name"))
+        .join(Agent, Agent.id == AgentEvent.agent_id)
+        .order_by(AgentEvent.timestamp.desc())
+        .limit(limit)
+    )
+    if agent_id is not None:
+        stmt = stmt.where(AgentEvent.agent_id == agent_id)
+
+    rows = (await db.execute(stmt)).all()
+    return [
+        EventListItem(
+            event_id=ev.id,
+            agent_id=ev.agent_id,
+            agent_name=agent_name,
+            tool_name=ev.tool_name,
+            anomaly_score=ev.anomaly_score,
+            duration_ms=ev.duration_ms,
+            session_id=ev.session_id,
+            timestamp=ev.timestamp,
+        )
+        for ev, agent_name in rows
+    ]
 
 
 @router.post("", response_model=EventResponse, status_code=201,
