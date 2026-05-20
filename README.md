@@ -11,43 +11,57 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        FastAPI (port 8000)                   │
-│   /api/v1/agents   /api/v1/events   /api/v1/findings        │
-│   /api/v1/agents/{id}/score         /api/v1/agents/{id}/...  │
-└──────────────────────┬──────────────────────────────────────┘
+  Agents / Clients
+  ─────────────────────────────────────────────────────────────
+  ┌──────────────────┐  ┌─────────────────┐  ┌─────────────┐
+  │  demo/agent.py   │  │  demo/mcp_shim  │  │  React UI   │
+  │  (Claude loop +  │  │  (MCP proxy,    │  │  port 5173  │
+  │   SentinelMiddle │  │   zero-touch)   │  │             │
+  │   ware)          │  │                 │  │             │
+  └────────┬─────────┘  └────────┬────────┘  └──────┬──────┘
+           │  POST /api/v1/events │                  │ /api/*
+           └──────────────────────┘                  │
+                        │                            │
+  ─────────────────────────────────────────────────────────────
+  ┌─────────────────────────────────────────────────────────┐
+  │                  FastAPI (port 9000)                     │
+  │  /api/v1/agents   /api/v1/events   /api/v1/findings     │
+  │  /api/v1/agents/{id}/score         /api/v1/agents/{id}/ │
+  └──────────────────────┬──────────────────────────────────┘
+                         │
+            ┌────────────┴────────────┐
+            ▼                         ▼
+  ┌─────────────────┐       ┌──────────────────┐
+  │  POSTURE ENGINE │       │ BEHAVIOR ENGINE  │
+  │                 │       │                  │
+  │  rules.py       │       │  collector.py    │
+  │  scanner.py     │       │  baseline.py     │
+  │  scoring.py     │       │  anomaly.py      │
+  │  inventory.py   │       │  scoring.py      │
+  └────────┬────────┘       └───────┬──────────┘
+           │                        │
+           └────────────┬───────────┘
+                        ▼
+              ┌──────────────────┐
+              │  TRUST ENGINE    │
+              │  engine.py       │
+              │  (0.45+0.45+0.10)│
+              └────────┬─────────┘
                        │
-          ┌────────────┴────────────┐
-          ▼                         ▼
-┌─────────────────┐       ┌──────────────────┐
-│  POSTURE ENGINE │       │ BEHAVIOR ENGINE  │
-│                 │       │                  │
-│  rules.py       │       │  collector.py    │
-│  scanner.py     │       │  baseline.py     │
-│  scoring.py     │       │  anomaly.py      │
-└────────┬────────┘       └───────┬──────────┘
-         │                        │
-         └────────────┬───────────┘
-                      ▼
-            ┌──────────────────┐
-            │  TRUST ENGINE    │
-            │  engine.py       │
-            │  (0.45+0.45+0.10)│
-            └────────┬─────────┘
-                     │
-         ┌───────────┴────────────┐
-         ▼                        ▼
-┌─────────────────┐     ┌──────────────────┐
-│   PostgreSQL 16  │     │   Redis Streams  │
-│   + TimescaleDB  │     │   agent_events   │
-│   (hypertable)   │     └──────────────────┘
-└─────────────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Slack Alerts   │
-│  (CRITICAL only)│
-└─────────────────┘
+           ┌───────────┴────────────┐
+           ▼                        ▼
+  ┌─────────────────┐     ┌──────────────────┐
+  │   PostgreSQL 16  │     │   Redis Streams  │
+  │   + TimescaleDB  │     │   agent_events   │
+  │   (hypertable)   │     └──────────────────┘
+  └─────────────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │  Slack Alerts   │
+  │  alerts/slack.py│
+  │  (CRITICAL only)│
+  └─────────────────┘
 ```
 
 ---
