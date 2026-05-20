@@ -94,6 +94,23 @@ Run migrations (first time or after pulls):
 docker compose exec api alembic upgrade head
 ```
 
+**Bootstrap API key** — on first startup, AgentSentinel automatically creates an admin key and prints it to the API container logs:
+
+```
+╔══════════════════════════════════════════════════════╗
+║  AgentSentinel bootstrap admin key (shown once)      ║
+║  as_adm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...   ║
+╚══════════════════════════════════════════════════════╝
+```
+
+Copy it and add it to your `.env`:
+
+```bash
+AGENTSENTINEL_API_KEY=as_adm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+```
+
+This key is required for all API calls after the first startup.
+
 **Start the UI** (separate terminal):
 
 ```bash
@@ -104,19 +121,63 @@ Open **http://localhost:5173** — the UI proxies all `/api` requests to the bac
 
 ---
 
+## Authentication
+
+All API endpoints require an `X-API-Key` header. Three scopes exist:
+
+| Scope | Key prefix | Permissions |
+|-------|-----------|-------------|
+| `admin` | `as_adm_…` | Full access — register agents, ingest events, manage keys |
+| `agent` | `as_agt_…` | Ingest events only (`POST /api/v1/events`) |
+| `readonly` | `as_ro_…` | Read agents, findings, and scores; no writes |
+
+The bootstrap admin key (printed on first startup) has `admin` scope. Use it to create narrower-scope keys for agents and read-only dashboards.
+
+### Create an agent-scoped key
+
+```bash
+curl -s -X POST https://localhost/api/v1/keys \
+  -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "prod-agent-key", "scope": "agent"}' | jq .
+```
+
+The response includes a `key` field — this is the **only time the plaintext key is returned**. Store it securely.
+
+### List active keys
+
+```bash
+curl -s https://localhost/api/v1/keys \
+  -H "X-API-Key: $AGENTSENTINEL_API_KEY" | jq .
+```
+
+Key hashes and prefixes are shown; the plaintext is never stored or returned again.
+
+### Revoke a key
+
+```bash
+curl -s -X DELETE https://localhost/api/v1/keys/<key-id> \
+  -H "X-API-Key: $AGENTSENTINEL_API_KEY"
+```
+
+---
+
 ## API Reference
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/agents` | Register a new agent |
-| `GET` | `/api/v1/agents` | List agents (filter: `?status=CRITICAL&owner_team=ml`) |
-| `GET` | `/api/v1/agents/{id}` | Agent detail with grants, connections, findings |
-| `POST` | `/api/v1/agents/{id}/grants` | Add a tool grant to an agent |
-| `POST` | `/api/v1/agents/{id}/mcp` | Add an MCP server connection |
-| `POST` | `/api/v1/events` | Ingest a tool-call event (returns anomaly score) |
-| `GET` | `/api/v1/agents/{id}/findings` | List findings (filter: `?status=OPEN&severity=CRITICAL`) |
-| `PATCH` | `/api/v1/findings/{id}` | Update finding status (ACKNOWLEDGED / RESOLVED) |
-| `GET` | `/api/v1/agents/{id}/score` | Trigger full trust score recompute |
+| Method | Endpoint | Scope | Description |
+|--------|----------|-------|-------------|
+| `POST` | `/api/v1/agents` | admin | Register a new agent |
+| `GET` | `/api/v1/agents` | readonly | List agents (filter: `?status=CRITICAL&owner_team=ml`) |
+| `GET` | `/api/v1/agents/{id}` | readonly | Agent detail with grants, connections, findings |
+| `POST` | `/api/v1/agents/{id}/grants` | admin | Add a tool grant to an agent |
+| `POST` | `/api/v1/agents/{id}/mcp` | admin | Add an MCP server connection |
+| `POST` | `/api/v1/events` | agent | Ingest a tool-call event (returns anomaly score) |
+| `GET` | `/api/v1/agents/{id}/findings` | readonly | List findings (filter: `?status=OPEN&severity=CRITICAL`) |
+| `PATCH` | `/api/v1/findings/{id}` | admin | Update finding status (ACKNOWLEDGED / RESOLVED) |
+| `GET` | `/api/v1/agents/{id}/score` | readonly | Trigger full trust score recompute |
+| `POST` | `/api/v1/keys` | admin | Create a new API key |
+| `GET` | `/api/v1/keys` | admin | List all active API keys |
+| `DELETE` | `/api/v1/keys/{id}` | admin | Revoke an API key |
 
 ---
 
@@ -142,7 +203,8 @@ Trust Score = (Posture Score × 0.45) + (Behavior Score × 0.45) + (Recency × 0
 ### 1. Register an agent
 
 ```bash
-curl -s -X POST http://localhost:9000/api/v1/agents \
+curl -s -X POST https://localhost/api/v1/agents \
+  -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "sales-rag-bot",
@@ -158,7 +220,8 @@ Save the returned `id` as `AGENT_ID`.
 ### 2. Add a tool grant
 
 ```bash
-curl -s -X POST http://localhost:9000/api/v1/agents/$AGENT_ID/grants \
+curl -s -X POST https://localhost/api/v1/agents/$AGENT_ID/grants \
+  -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "tool_name": "crm_search",
@@ -174,7 +237,8 @@ curl -s -X POST http://localhost:9000/api/v1/agents/$AGENT_ID/grants \
 INPUT_HASH=$(echo -n "query: top accounts" | sha256sum | cut -d' ' -f1)
 OUTPUT_HASH=$(echo -n "account list json" | sha256sum | cut -d' ' -f1)
 
-curl -s -X POST http://localhost:9000/api/v1/events \
+curl -s -X POST https://localhost/api/v1/events \
+  -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
   -H "Content-Type: application/json" \
   -d "{
     \"agent_id\": \"$AGENT_ID\",
@@ -189,7 +253,8 @@ curl -s -X POST http://localhost:9000/api/v1/events \
 ### 4. Get the Trust Score
 
 ```bash
-curl -s http://localhost:9000/api/v1/agents/$AGENT_ID/score | jq .
+curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
+  https://localhost/api/v1/agents/$AGENT_ID/score | jq .
 ```
 
 ---
@@ -243,6 +308,7 @@ mw.run("Who are our top enterprise accounts?")
 pip install anthropic httpx
 
 export ANTHROPIC_API_KEY=sk-ant-...
+export AGENTSENTINEL_API_KEY=as_adm_...   # bootstrap key from docker compose logs
 
 # Make sure the backend is running
 docker compose up -d
@@ -270,6 +336,12 @@ Agent  →  MCP Shim (port 8002)  →  Real MCP Server
 
 ```bash
 pip install -r demo/requirements.txt
+```
+
+The shim requires an API key with `admin` scope (to register agents) or an existing `agent_id` plus an `agent`-scope key.
+
+```bash
+export AGENTSENTINEL_API_KEY=as_adm_...   # or pass --api-key on the command line
 ```
 
 **Against a stdio MCP server** (tested — uses the official filesystem MCP server via npx):
@@ -308,9 +380,10 @@ Then change one line in your agent config:
 
 ### Test the shim
 
-With the shim running, use the included test client to verify interception end-to-end:
+With the shim running, use the included test client to verify interception end-to-end (set `AGENTSENTINEL_API_KEY` so it can query AgentSentinel):
 
 ```bash
+export AGENTSENTINEL_API_KEY=as_adm_...
 python demo/test_shim.py
 ```
 
