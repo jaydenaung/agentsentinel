@@ -247,12 +247,36 @@ def register_agent(
     return r.json()["id"]
 
 
+# Tool name fragments that indicate write or destructive operations.
+_WRITE_PATTERNS = (
+    "write", "edit", "create", "delete", "remove", "move", "rename",
+    "execute", "run", "exec", "patch", "update", "insert", "drop", "truncate",
+    "send", "post", "put", "upload", "deploy", "reset", "kill",
+)
+
+# A subset of write operations considered dangerous (side-effects beyond the local FS).
+_DANGEROUS_PATTERNS = (
+    "delete", "remove", "drop", "truncate", "execute", "run", "exec",
+    "send", "deploy", "reset", "kill",
+)
+
+
+def _classify_tool(tool_name: str) -> tuple[str, bool]:
+    """Return (scope, is_dangerous) inferred from the tool name."""
+    lower = tool_name.lower()
+    is_write = any(p in lower for p in _WRITE_PATTERNS)
+    is_dangerous = any(p in lower for p in _DANGEROUS_PATTERNS)
+    scope = "write" if is_write else "read"
+    return scope, is_dangerous
+
+
 def add_grants(sentinel_url: str, agent_id: str, tools: list[Tool], api_key: str = "") -> None:
     headers = {"X-API-Key": api_key} if api_key else {}
     for tool in tools:
+        scope, is_dangerous = _classify_tool(tool.name)
         httpx.post(
             f"{sentinel_url}/api/v1/agents/{agent_id}/grants",
-            json={"tool_name": tool.name, "scope": "read", "is_dangerous": False},
+            json={"tool_name": tool.name, "scope": scope, "is_dangerous": is_dangerous},
             headers=headers,
             timeout=10,
         ).raise_for_status()
