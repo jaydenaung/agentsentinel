@@ -1,6 +1,7 @@
 """LangChain callback handler for AgentSentinel security monitoring."""
 
 import hashlib
+import json
 import time
 import uuid
 from typing import Any, Dict, Optional, Union
@@ -21,8 +22,16 @@ _DANGEROUS_PATTERNS = (
 )
 
 
-def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
+def _sha256(value: Any) -> str:
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, dict):
+        text = json.dumps(value, sort_keys=True, default=str)
+    else:
+        # ToolMessage and other LangChain objects — extract text content if available
+        content = getattr(value, "content", None)
+        text = str(content) if content is not None else str(value)
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def _classify_tool(tool_name: str) -> tuple[str, bool]:

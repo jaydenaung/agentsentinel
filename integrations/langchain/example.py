@@ -1,8 +1,8 @@
 """
-AgentSentinel + LangChain — minimal working example.
+AgentSentinel + LangChain 1.x — minimal working example.
 
 Prerequisites:
-    pip install agentsentinel-langchain langchain-anthropic
+    pip install agentsentinel-langchain langchain langchain-anthropic
 
     export ANTHROPIC_API_KEY=sk-ant-...
     export AGENTSENTINEL_API_KEY=as_agt_...          # agent-scoped key
@@ -14,9 +14,8 @@ Run:
 
 import os
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 
 from agentsentinel_langchain import SentinelCallbackHandler
@@ -64,42 +63,35 @@ sentinel = SentinelCallbackHandler(
 
 
 # ---------------------------------------------------------------------------
-# 3. Your agent — unchanged except for callbacks=[sentinel]
+# 3. Your agent — unchanged except callbacks in config
 # ---------------------------------------------------------------------------
 
 llm = ChatAnthropic(model="claude-opus-4-7")
-tools = [search_crm, read_database, send_email]
-
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful sales assistant. Use tools to answer questions accurately."),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
-
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(
-    agent=agent,
-    tools=tools,
-    callbacks=[sentinel],   # ← the only change
-    verbose=False,
+agent = create_agent(
+    llm,
+    tools=[search_crm, read_database, send_email],
+    system_prompt="You are a helpful sales assistant. Use tools to answer questions accurately.",
 )
 
 
 # ---------------------------------------------------------------------------
-# 4. Run it
+# 4. Run it — pass sentinel via config (zero changes to agent definition)
 # ---------------------------------------------------------------------------
 
 prompts = [
     "Search for Acme in the CRM and check this week's revenue numbers.",
-    "Find enterprise accounts in the CRM and draft a renewal email to Acme Corp.",
+    "Find enterprise accounts in the CRM and send Acme Corp a renewal email.",
 ]
 
 for prompt_text in prompts:
     print(f"\n{'═' * 60}")
     print(f"User: {prompt_text}")
     print('═' * 60)
-    result = agent_executor.invoke({"input": prompt_text})
-    print(f"\nAgent: {result['output']}")
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": prompt_text}]},
+        config={"callbacks": [sentinel]},   # ← the only change
+    )
+    print(f"\nAgent: {result['messages'][-1].content}")
 
 # Fetch and display the final trust score
 score = sentinel.get_trust_score()
