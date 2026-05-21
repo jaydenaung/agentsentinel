@@ -73,6 +73,23 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
 
 ---
 
+## Integrations
+
+| Framework | Install | Docs |
+|-----------|---------|------|
+| **LangChain** | `pip install agentsentinel-langchain` | [integrations/langchain](integrations/langchain/README.md) |
+
+```python
+from agentsentinel_langchain import SentinelCallbackHandler
+
+sentinel = SentinelCallbackHandler(api_key="as_agt_...")
+agent_executor = AgentExecutor(agent=agent, tools=tools, callbacks=[sentinel])
+```
+
+More integrations coming: OpenAI Agents SDK, AWS Bedrock Agents, CrewAI, AutoGen.
+
+---
+
 ## Features
 
 ### Posture Monitoring

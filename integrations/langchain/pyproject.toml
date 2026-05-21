@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentsentinel-langchain"
+version = "0.1.0"
+description = "LangChain integration for AgentSentinel — AI agent security monitoring"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["langchain", "ai-security", "agent-monitoring", "llm", "agentsentinel"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "langchain-core>=0.2.0",
+    "httpx>=0.24.0",
+]
+
+[project.optional-dependencies]
+anthropic = ["langchain-anthropic>=0.1.0"]
+openai   = ["langchain-openai>=0.1.0"]
+all      = ["langchain-anthropic>=0.1.0", "langchain-openai>=0.1.0"]
+
+[project.urls]
+Homepage   = "https://github.com/jaydenaung/agentsentinel"
+Repository = "https://github.com/jaydenaung/agentsentinel"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentsentinel_langchain"]
