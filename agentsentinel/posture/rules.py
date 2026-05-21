@@ -1,4 +1,4 @@
-"""Posture rule engine — six static rules that produce Findings."""
+"""Posture rule engine — thirteen static rules that produce Findings."""
 
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -27,6 +27,16 @@ def _make_finding(
 _INTERNAL_READ_KEYWORDS = {"db", "database", "crm", "file", "filesystem", "s3_read", "storage_read"}
 _EXTERNAL_WRITE_KEYWORDS = {"s3_write", "http_external", "email", "smtp", "webhook", "http_post"}
 _READ_PURPOSE_WORDS = {"read", "search", "query", "view", "lookup", "fetch", "get"}
+_CODE_EXEC_KEYWORDS = {"exec", "bash", "shell", "run_code", "eval", "terminal", "subprocess", "python_repl"}
+_SECRETS_KEYWORDS = {"secret", "credential", "vault", "token", "password", "api_key", "read_env"}
+_ADMIN_KEYWORDS = {"admin", "iam", "role", "permission", "policy", "sudo", "privilege"}
+_INFRA_KEYWORDS = {"deploy", "container", "k8s", "kubernetes", "aws", "gcp", "azure", "terraform"}
+_WEB_READ_KEYWORDS = {"http", "fetch", "url", "web", "scrape", "browse", "request"}
+
+
+def _tool_matches(tool_name: str, keywords: set[str]) -> bool:
+    lower = tool_name.lower()
+    return any(kw in lower for kw in keywords)
 
 
 def rule_exfiltration_path(
@@ -45,6 +55,127 @@ def rule_exfiltration_path(
             "EXFILTRATION_PATH",
             f"Agent '{agent.name}' holds both internal-read and external-write grants, "
             "creating a potential data exfiltration path.",
+        )
+    return None
+
+
+def rule_code_execution_grant(
+    agent: Agent,
+    grants: list[ToolGrant],
+    connections: list[McpConnection],
+) -> Finding | None:
+    """CRITICAL: agent holds code execution grants — arbitrary code paths enable host compromise."""
+    exec_grants = [g for g in grants if _tool_matches(g.tool_name, _CODE_EXEC_KEYWORDS)]
+    if exec_grants:
+        names = ", ".join(g.tool_name for g in exec_grants)
+        return _make_finding(
+            agent.id,
+            "CRITICAL",
+            "CODE_EXECUTION_GRANT",
+            f"Agent '{agent.name}' holds code-execution grants ({names}). "
+            "Arbitrary code execution enables full host compromise. Apply strict sandboxing.",
+        )
+    return None
+
+
+def rule_secrets_access_grant(
+    agent: Agent,
+    grants: list[ToolGrant],
+    connections: list[McpConnection],
+) -> Finding | None:
+    """HIGH: agent holds tools that access secrets, vaults, or credentials at runtime."""
+    secrets_grants = [g for g in grants if _tool_matches(g.tool_name, _SECRETS_KEYWORDS)]
+    if secrets_grants:
+        names = ", ".join(g.tool_name for g in secrets_grants)
+        return _make_finding(
+            agent.id,
+            "HIGH",
+            "SECRETS_ACCESS_GRANT",
+            f"Agent '{agent.name}' holds secrets-access grants ({names}). "
+            "Verify the agent requires runtime credential access; use scoped vault policies.",
+        )
+    return None
+
+
+def rule_prompt_injection_vector(
+    agent: Agent,
+    grants: list[ToolGrant],
+    connections: list[McpConnection],
+) -> Finding | None:
+    """HIGH: agent reads from web (untrusted input) and holds write grants — injection-to-write path."""
+    has_web_read = any(_tool_matches(g.tool_name, _WEB_READ_KEYWORDS) for g in grants)
+    write_grants = [g for g in grants if g.scope in ("write", "admin")]
+    if has_web_read and write_grants:
+        names = ", ".join(g.tool_name for g in write_grants)
+        return _make_finding(
+            agent.id,
+            "HIGH",
+            "PROMPT_INJECTION_VECTOR",
+            f"Agent '{agent.name}' reads from web sources and holds write grants ({names}). "
+            "Prompt injection in fetched content could redirect write operations.",
+        )
+    return None
+
+
+def rule_lateral_movement_path(
+    agent: Agent,
+    grants: list[ToolGrant],
+    connections: list[McpConnection],
+) -> Finding | None:
+    """HIGH: agent combines admin/IAM grants with infrastructure grants — lateral movement risk."""
+    admin_grants = [g for g in grants if _tool_matches(g.tool_name, _ADMIN_KEYWORDS)]
+    infra_grants = [g for g in grants if _tool_matches(g.tool_name, _INFRA_KEYWORDS)]
+    if admin_grants and infra_grants:
+        admin_names = ", ".join(g.tool_name for g in admin_grants)
+        infra_names = ", ".join(g.tool_name for g in infra_grants)
+        return _make_finding(
+            agent.id,
+            "HIGH",
+            "LATERAL_MOVEMENT_PATH",
+            f"Agent '{agent.name}' holds admin grants ({admin_names}) alongside infrastructure "
+            f"grants ({infra_names}). Separation of duty violation — lateral movement risk.",
+        )
+    return None
+
+
+def rule_unbounded_file_access(
+    agent: Agent,
+    grants: list[ToolGrant],
+    connections: list[McpConnection],
+) -> Finding | None:
+    """HIGH: agent holds filesystem write grants with no scoped description."""
+    fs_write = [
+        g for g in grants
+        if any(kw in g.tool_name.lower() for kw in {"write_file", "delete_file", "move_file", "filesystem"})
+        and g.scope in ("write", "admin")
+    ]
+    if fs_write and not agent.description:
+        names = ", ".join(g.tool_name for g in fs_write)
+        return _make_finding(
+            agent.id,
+            "HIGH",
+            "UNBOUNDED_FILE_ACCESS",
+            f"Agent '{agent.name}' holds filesystem write grants ({names}) with no description. "
+            "Without a declared scope, write access is effectively unbounded.",
+        )
+    return None
+
+
+def rule_insecure_mcp_connection(
+    agent: Agent,
+    grants: list[ToolGrant],
+    connections: list[McpConnection],
+) -> Finding | None:
+    """HIGH: MCP connection using plain HTTP (not HTTPS) — credentials and data sent in the clear."""
+    insecure = [c for c in connections if c.endpoint.startswith("http://")]
+    if insecure:
+        endpoints = ", ".join(c.endpoint for c in insecure)
+        return _make_finding(
+            agent.id,
+            "HIGH",
+            "INSECURE_MCP_CONNECTION",
+            f"Agent '{agent.name}' connects to MCP endpoints over plain HTTP: {endpoints}. "
+            "Use HTTPS to prevent credential interception.",
         )
     return None
 
@@ -91,6 +222,23 @@ def rule_unused_dangerous_grant(
             "HIGH",
             "UNUSED_DANGEROUS_GRANT",
             f"Agent '{agent.name}' has dangerous grants with no recent activity: {names}.",
+        )
+    return None
+
+
+def rule_tool_sprawl(
+    agent: Agent,
+    grants: list[ToolGrant],
+    connections: list[McpConnection],
+) -> Finding | None:
+    """MEDIUM: agent holds an excessive number of grants — blast radius scales with sprawl."""
+    if len(grants) > 15:
+        return _make_finding(
+            agent.id,
+            "MEDIUM",
+            "TOOL_SPRAWL",
+            f"Agent '{agent.name}' holds {len(grants)} tool grants. "
+            "Excessive grants increase blast radius. Apply least-privilege — remove what isn't used.",
         )
     return None
 
@@ -149,11 +297,22 @@ def rule_missing_rate_limit(
 
 
 ALL_RULES = [
+    # CRITICAL
     rule_exfiltration_path,
+    rule_code_execution_grant,
+    # HIGH
+    rule_secrets_access_grant,
+    rule_prompt_injection_vector,
+    rule_lateral_movement_path,
+    rule_unbounded_file_access,
+    rule_insecure_mcp_connection,
     rule_privilege_excess,
     rule_unused_dangerous_grant,
+    # MEDIUM
+    rule_tool_sprawl,
     rule_mcp_over_connection,
     rule_credential_scope_mismatch,
+    # LOW
     rule_missing_rate_limit,
 ]
 

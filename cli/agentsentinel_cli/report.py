@@ -77,10 +77,18 @@ def print_scan_result(
 
         console.print(f"\n[bold white]File:[/bold white] [dim]{agent.file}[/dim]")
 
+        # Hardcoded credentials warning (show before tools table)
+        if agent.hardcoded_creds:
+            console.print()
+            for cred in agent.hardcoded_creds:
+                console.print(f"  [bold red]⛔ HARDCODED CREDENTIAL[/bold red]  [dim]{cred}[/dim]")
+            console.print()
+
         # Tools table
         tools_table = Table(box=box.SIMPLE, show_header=True, header_style="dim", padding=(0, 1))
         tools_table.add_column("Scope", style="dim", width=6)
         tools_table.add_column("Tool", style="bold white")
+        tools_table.add_column("Category", style="dim", width=14)
         tools_table.add_column("", width=12)
 
         for tool in sorted(agent.tools, key=lambda t: (t.scope, t.name)):
@@ -89,6 +97,7 @@ def print_scan_result(
             tools_table.add_row(
                 Text(scope_label, style=scope_color),
                 tool.name,
+                tool.category,
                 danger_tag,
             )
         console.print(tools_table)
@@ -157,11 +166,13 @@ def as_json(
             "file": str(agent.file),
             "model": agent.model,
             "description": agent.description,
+            "hardcoded_credentials": agent.hardcoded_creds,
             "tools": [
                 {
                     "name": t.name,
                     "scope": t.scope,
                     "is_dangerous": t.is_dangerous,
+                    "category": t.category,
                 }
                 for t in agent.tools
             ],

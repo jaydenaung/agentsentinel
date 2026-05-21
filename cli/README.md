@@ -46,8 +46,15 @@ sentinel scan my_agent.py --connect http://localhost:9000
 | Rule | Severity | Description |
 |------|----------|-------------|
 | `EXFILTRATION_PATH` | CRITICAL | Agent holds internal-read AND external-write grants |
-| `DANGEROUS_GRANTS` | HIGH | Agent holds dangerous tool grants |
+| `CODE_EXECUTION_GRANT` | CRITICAL | Agent holds bash/exec/shell grants — arbitrary code execution risk |
+| `HARDCODED_CREDENTIALS` | CRITICAL | API keys or secrets hardcoded in source — rotate immediately |
+| `SECRETS_ACCESS_GRANT` | HIGH | Agent holds runtime access to vaults, tokens, or credentials |
+| `PROMPT_INJECTION_VECTOR` | HIGH | Agent reads from web (untrusted) AND holds write grants |
+| `LATERAL_MOVEMENT_PATH` | HIGH | Agent combines admin/IAM grants with infrastructure grants |
+| `UNBOUNDED_FILE_ACCESS` | HIGH | Filesystem write grants with no scoped agent description |
 | `PRIVILEGE_EXCESS` | HIGH | Write grants on a read-only described agent |
+| `DANGEROUS_GRANTS` | HIGH | Agent holds dangerous tool grants |
+| `TOOL_SPRAWL` | MEDIUM | Too many tools across too many categories — reduce blast radius |
 | `UNDESCRIBED_WRITE_AGENT` | MEDIUM | Write grants with no agent description |
 | `MISSING_RATE_LIMIT` | LOW | Dangerous grants without rate limit configuration |
 

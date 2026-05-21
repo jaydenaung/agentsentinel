@@ -2,8 +2,12 @@
 
 import ast
 import dataclasses
+import re
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Data models
+# ---------------------------------------------------------------------------
 
 @dataclasses.dataclass
 class ToolInfo:
@@ -12,6 +16,7 @@ class ToolInfo:
     is_dangerous: bool
     source: str         # how it was detected
     docstring: str = ""
+    category: str = "other"
 
 
 @dataclasses.dataclass
@@ -20,7 +25,12 @@ class AgentInfo:
     tools: list[ToolInfo]
     description: str = ""
     model: str = ""
+    hardcoded_creds: list[str] = dataclasses.field(default_factory=list)
 
+
+# ---------------------------------------------------------------------------
+# Classification helpers
+# ---------------------------------------------------------------------------
 
 _WRITE_PATTERNS = (
     "write", "edit", "create", "delete", "remove", "move", "rename",
@@ -35,6 +45,30 @@ _KNOWN_MODELS = (
     "gpt-", "claude-", "gemini-", "mistral", "llama", "mixtral",
     "command", "titan", "nova",
 )
+_TOOL_CATEGORIES = {
+    "database":      ("database", "db", "sql", "query", "postgres", "mysql", "mongo"),
+    "filesystem":    ("file", "directory", "disk", "path", "read_file", "write_file"),
+    "web":           ("http", "fetch", "url", "web", "scrape", "browse", "request"),
+    "communication": ("email", "smtp", "slack", "webhook", "notify", "send_message"),
+    "code_execution":("exec", "bash", "shell", "run_code", "eval", "terminal", "subprocess", "python_repl"),
+    "secrets":       ("secret", "credential", "vault", "token", "password", "api_key", "read_env"),
+    "admin":         ("admin", "iam", "role", "permission", "policy", "sudo", "privilege"),
+    "crm":           ("crm", "customer", "account", "contact", "salesforce", "hubspot"),
+    "analytics":     ("analytics", "metric", "report", "dashboard", "bi", "insight"),
+    "infrastructure":("deploy", "container", "k8s", "kubernetes", "aws", "gcp", "azure", "terraform"),
+}
+
+# Credential detection
+_CRED_VARNAMES = frozenset({
+    "api_key", "apikey", "api_token", "token", "secret", "password",
+    "passwd", "credential", "auth_token", "access_token", "secret_key",
+    "private_key", "bearer_token", "auth_key",
+})
+_CRED_PREFIXES = (
+    "sk-ant-", "sk-proj-", "sk-", "Bearer ", "ghp_", "gho_", "github_pat_",
+    "xoxb-", "xoxp-", "AIza", "ya29.", "AKIA", "eyJ",  # JWT
+)
+_CRED_REGEX = re.compile(r'^[A-Za-z0-9+/\-_]{32,}={0,2}$')
 
 
 def _classify(name: str) -> tuple[str, bool]:
@@ -44,8 +78,15 @@ def _classify(name: str) -> tuple[str, bool]:
     return ("write" if is_write else "read"), is_dangerous
 
 
+def _categorize(name: str) -> str:
+    lower = name.lower()
+    for category, patterns in _TOOL_CATEGORIES.items():
+        if any(p in lower for p in patterns):
+            return category
+    return "other"
+
+
 def _get_string(node: ast.expr | None) -> str:
-    """Extract a string constant from an AST node."""
     if node is None:
         return ""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -53,13 +94,21 @@ def _get_string(node: ast.expr | None) -> str:
     return ""
 
 
-def _has_decorator(func_node: ast.FunctionDef | ast.AsyncFunctionDef, names: tuple[str, ...]) -> bool:
+def _looks_like_credential(value: str) -> bool:
+    if any(value.startswith(p) for p in _CRED_PREFIXES):
+        return len(value) > 16
+    return bool(_CRED_REGEX.match(value)) and len(value) >= 32
+
+
+def _has_decorator(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    names: tuple[str, ...],
+) -> bool:
     for dec in func_node.decorator_list:
         if isinstance(dec, ast.Name) and dec.id in names:
             return True
         if isinstance(dec, ast.Attribute) and dec.attr in names:
             return True
-        # @tool(return_direct=True) style
         if isinstance(dec, ast.Call):
             if isinstance(dec.func, ast.Name) and dec.func.id in names:
                 return True
@@ -68,13 +117,18 @@ def _has_decorator(func_node: ast.FunctionDef | ast.AsyncFunctionDef, names: tup
     return False
 
 
+# ---------------------------------------------------------------------------
+# AST visitor
+# ---------------------------------------------------------------------------
+
 class _AgentFileVisitor(ast.NodeVisitor):
-    """Walk an AST and collect tool definitions and agent metadata."""
+    """Walk an AST and collect tool definitions, agent metadata, and credentials."""
 
     def __init__(self) -> None:
         self.tools: list[ToolInfo] = []
         self.description: str = ""
         self.model: str = ""
+        self.hardcoded_creds: list[str] = []
         self._seen: set[str] = set()
 
     def _add_tool(self, name: str, source: str, docstring: str = "") -> None:
@@ -83,17 +137,19 @@ class _AgentFileVisitor(ast.NodeVisitor):
         self._seen.add(name)
         scope, is_dangerous = _classify(name)
         self.tools.append(ToolInfo(
-            name=name, scope=scope,
+            name=name,
+            scope=scope,
             is_dangerous=is_dangerous,
-            source=source, docstring=docstring,
+            source=source,
+            docstring=docstring,
+            category=_categorize(name),
         ))
 
     # ------------------------------------------------------------------
-    # @tool decorated functions
+    # @tool / @SentinelTool decorated functions
     # ------------------------------------------------------------------
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        # Covers @tool, @SentinelTool, @beta_tool, @betaZodTool, etc.
         if _has_decorator(node, ("tool", "SentinelTool", "beta_tool", "betaZodTool")):
             doc = ast.get_docstring(node) or ""
             self._add_tool(node.name, "@tool decorator", doc)
@@ -102,7 +158,7 @@ class _AgentFileVisitor(ast.NodeVisitor):
     visit_AsyncFunctionDef = visit_FunctionDef
 
     # ------------------------------------------------------------------
-    # Class-based tools: class MyTool(BaseTool): name = "my_tool"
+    # Class-based tools
     # ------------------------------------------------------------------
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -124,7 +180,7 @@ class _AgentFileVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     # ------------------------------------------------------------------
-    # Call-based tools: Tool(name="x"), StructuredTool.from_function(f, name="x")
+    # Tool() / StructuredTool() call-based tools + model + description
     # ------------------------------------------------------------------
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -141,7 +197,6 @@ class _AgentFileVisitor(ast.NodeVisitor):
                     if tool_name:
                         self._add_tool(tool_name, f"{func_name}(name=...)")
 
-        # Detect model strings: ChatAnthropic(model="claude-..."), ChatOpenAI(model="gpt-...")
         if func_name in ("ChatAnthropic", "ChatOpenAI", "ChatGoogleGenerativeAI",
                          "AzureChatOpenAI", "BedrockChat", "init_chat_model"):
             for kw in node.keywords:
@@ -149,19 +204,16 @@ class _AgentFileVisitor(ast.NodeVisitor):
                     val = _get_string(kw.value)
                     if val and not self.model:
                         self.model = val
-            # positional: create_agent("openai:gpt-4o", ...)
             if node.args:
                 val = _get_string(node.args[0])
                 if val and any(val.startswith(p) for p in _KNOWN_MODELS) and not self.model:
                     self.model = val
 
-        # create_agent("openai:gpt-4o", ...) — first arg is model string
         if func_name == "create_agent" and node.args:
             val = _get_string(node.args[0])
             if val and not self.model:
                 self.model = val
 
-        # SentinelCallbackHandler(description="...") — pick up agent description
         if func_name == "SentinelCallbackHandler":
             for kw in node.keywords:
                 if kw.arg == "description" and not self.description:
@@ -170,17 +222,46 @@ class _AgentFileVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     # ------------------------------------------------------------------
-    # Module-level description strings assigned to variables
+    # Variable assignments — description detection + hardcoded credentials
     # ------------------------------------------------------------------
 
     def visit_Assign(self, node: ast.Assign) -> None:
         for target in node.targets:
-            if isinstance(target, ast.Name) and "description" in target.id.lower():
+            if not isinstance(target, ast.Name):
+                continue
+            varname = target.id.lower()
+
+            if "description" in varname and not self.description:
                 val = _get_string(node.value)
-                if val and not self.description:
+                if val:
                     self.description = val
+
+            # Credential detection: api_key = "sk-ant-..."
+            if varname in _CRED_VARNAMES:
+                val = _get_string(node.value)
+                if val and _looks_like_credential(val):
+                    self.hardcoded_creds.append(
+                        f"{target.id} = \"{val[:8]}…\" (line {node.lineno})"
+                    )
+
         self.generic_visit(node)
 
+    # ------------------------------------------------------------------
+    # Keyword arguments — catch api_key="..." in function calls
+    # ------------------------------------------------------------------
+
+    def visit_keyword(self, node: ast.keyword) -> None:
+        if node.arg and node.arg.lower() in _CRED_VARNAMES:
+            val = _get_string(node.value)
+            if val and _looks_like_credential(val):
+                self.hardcoded_creds.append(
+                    f"{node.arg} = \"{val[:8]}…\" (line {node.value.lineno})"  # type: ignore[attr-defined]
+                )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def scan_file(path: Path) -> AgentInfo | None:
     """Parse a Python file and extract agent/tool information. Returns None on parse error."""
@@ -201,6 +282,7 @@ def scan_file(path: Path) -> AgentInfo | None:
         tools=visitor.tools,
         description=visitor.description,
         model=visitor.model,
+        hardcoded_creds=visitor.hardcoded_creds,
     )
 
 
@@ -212,7 +294,6 @@ def scan_path(target: Path) -> list[AgentInfo]:
 
     results = []
     for py_file in sorted(target.rglob("*.py")):
-        # Skip obvious non-agent files
         if any(part.startswith((".venv", "venv", "__pycache__", ".git", "node_modules"))
                for part in py_file.parts):
             continue
