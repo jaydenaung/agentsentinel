@@ -75,8 +75,9 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
 
 ## Integrations
 
-| Framework | Install | Docs |
+| Component | Install | Docs |
 |-----------|---------|------|
+| **CLI Scanner** | `pip install agentsentinel-cli` | [Part 5 ↓](#part-5--cli-scanner) |
 | **LangChain** | `pip install agentsentinel-langchain` | [Part 4 ↓](#part-4--langchain-integration) |
 
 More integrations coming: OpenAI Agents SDK, AWS Bedrock Agents, CrewAI, AutoGen.
@@ -861,3 +862,100 @@ python example.py
 | `model` | `None` | LLM model name |
 | `owner_team` | `None` | Team responsible for this agent |
 | `description` | `None` | Agent purpose (used by posture rules) |
+
+---
+
+## Part 5 — CLI Scanner
+
+Scan any Python agent file for security issues in one command. **No server, no Docker, no setup.**
+
+```bash
+pip install agentsentinel-cli
+sentinel scan my_agent.py
+```
+
+```
+╭─────────────────────────────────────────────╮
+│  AgentSentinel Security Scan                │
+│  Target: my_agent.py                        │
+╰─────────────────────────────────────────────╯
+
+  Scope    Tool
+  ─────────────────────────────────────────
+  read     search_crm
+  read     read_database
+  write    send_email      ⚠ dangerous
+  write    write_file
+
+  ● CRITICAL  EXFILTRATION_PATH
+             Agent holds both internal-read and external-write grants.
+             Internal-read: read_database, search_crm | External-write: send_email
+
+  ● HIGH      DANGEROUS_GRANTS
+             Agent holds dangerous tool grants. Verify intent and add rate limits.
+
+  Posture Score   35/100  ███████░░░░░░░░░░░░░  CRITICAL
+```
+
+### Install
+
+```bash
+pip install agentsentinel-cli
+```
+
+### Commands
+
+```bash
+# Scan a single file
+sentinel scan my_agent.py
+
+# Scan a directory (recursive)
+sentinel scan ./agents/
+
+# Gate CI/CD — exit code 1 on CRITICAL findings
+sentinel scan my_agent.py --fail-on CRITICAL
+
+# JSON output for integration with other tools
+sentinel scan my_agent.py --format json
+
+# Include live behavior data from a running AgentSentinel instance
+sentinel scan my_agent.py \
+  --connect http://localhost:9000 \
+  --api-key $AGENTSENTINEL_API_KEY
+```
+
+### CI/CD integration
+
+Block merges when CRITICAL agent security issues are detected:
+
+```yaml
+# .github/workflows/security.yml
+name: Agent Security Scan
+on: [pull_request]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install agentsentinel-cli
+      - run: sentinel scan ./agents/ --fail-on CRITICAL
+```
+
+### What it detects
+
+| Rule | Severity | Trigger |
+|------|----------|---------|
+| `EXFILTRATION_PATH` | CRITICAL | Agent holds internal-read AND external-write grants |
+| `DANGEROUS_GRANTS` | HIGH | Agent holds dangerous tool grants |
+| `PRIVILEGE_EXCESS` | HIGH | Write grants on a read-only described agent |
+| `UNDESCRIBED_WRITE_AGENT` | MEDIUM | Write grants with no agent description |
+| `MISSING_RATE_LIMIT` | LOW | Dangerous grants without rate limit configuration |
+
+### Tool detection
+
+The scanner detects tools defined via:
+- `@tool` decorator (LangChain)
+- `@SentinelTool` decorator (AgentSentinel middleware)
+- `BaseTool` / `StructuredTool` subclasses
+- `Tool(name=...)` and `StructuredTool(name=...)` instantiations

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentsentinel-cli"
+version = "0.1.0"
+description = "One-command security scanner for AI agents — finds exfiltration paths, dangerous grants, and posture issues without a running server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["ai-security", "llm", "agent-security", "langchain", "cli", "scanner", "devsecops"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Environment :: Console",
+]
+dependencies = [
+    "click>=8.0.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+connect = ["httpx>=0.24.0"]   # needed for --connect flag
+
+[project.scripts]
+sentinel = "agentsentinel_cli.cli:main"
+
+[project.urls]
+Homepage   = "https://github.com/jaydenaung/agentsentinel"
+Repository = "https://github.com/jaydenaung/agentsentinel"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentsentinel_cli"]
