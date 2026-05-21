@@ -77,14 +77,7 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
 
 | Framework | Install | Docs |
 |-----------|---------|------|
-| **LangChain** | `pip install agentsentinel-langchain` | [integrations/langchain](integrations/langchain/README.md) |
-
-```python
-from agentsentinel_langchain import SentinelCallbackHandler
-
-sentinel = SentinelCallbackHandler(api_key="as_agt_...")
-agent_executor = AgentExecutor(agent=agent, tools=tools, callbacks=[sentinel])
-```
+| **LangChain** | `pip install agentsentinel-langchain` | [Part 4 ↓](#part-4--langchain-integration) |
 
 More integrations coming: OpenAI Agents SDK, AWS Bedrock Agents, CrewAI, AutoGen.
 
@@ -745,3 +738,126 @@ ports:
 | `MCP_OVER_CONNECTION` | MEDIUM | >3 MCP connections with no agent description |
 | `CREDENTIAL_SCOPE_MISMATCH` | MEDIUM | admin grant with zero calls in last 7 days |
 | `MISSING_RATE_LIMIT` | LOW | dangerous grant with no rate limit configured |
+
+---
+
+## Part 4 — LangChain Integration
+
+Monitor any LangChain agent with AgentSentinel — **zero changes to your agent logic, tools, or prompts.**
+
+```
+Your LangChain Agent
+  └── create_agent(llm, tools, callbacks=[sentinel])
+           │
+           └── SentinelCallbackHandler
+                    │  on_tool_start / on_tool_end / on_tool_error
+                    ▼
+             POST /api/v1/events  →  AgentSentinel
+```
+
+### Prerequisites
+
+- Python 3.10+
+- AgentSentinel running (Part 1 complete)
+- An [Anthropic API key](https://console.anthropic.com/) (or any LangChain-supported LLM)
+
+### Step 1 — Install
+
+```bash
+pip install agentsentinel-langchain langchain langchain-anthropic
+```
+
+### Step 2 — Set environment variables
+
+```bash
+export AGENTSENTINEL_API_KEY=as_agt_...    # agent-scoped key from Part 1
+export ANTHROPIC_API_KEY=sk-ant-...
+export SENTINEL_URL=http://localhost:9000
+```
+
+### Step 3 — Add one object to your agent
+
+```python
+from agentsentinel_langchain import SentinelCallbackHandler
+
+sentinel = SentinelCallbackHandler(
+    api_key=os.environ["AGENTSENTINEL_API_KEY"],
+    base_url=os.environ.get("SENTINEL_URL", "http://localhost:9000"),
+    agent_name="my-langchain-agent",        # shown in dashboard
+    model="claude-opus-4-7",
+    owner_team="platform-eng",
+    description="Queries CRM and sends customer emails",
+)
+```
+
+### Step 4 — Pass it as a callback
+
+```python
+from langchain.agents import create_agent
+from langchain_anthropic import ChatAnthropic
+
+llm = ChatAnthropic(model="claude-opus-4-7")
+agent = create_agent(llm, tools=[search_crm, read_database, send_email])
+
+result = agent.invoke(
+    {"messages": [{"role": "user", "content": "Search CRM for Acme and send a renewal email."}]},
+    config={"callbacks": [sentinel]},   # ← the only change
+)
+```
+
+That's it. Every tool call is now intercepted, hashed, scored for anomalies, and visible in the dashboard.
+
+### Step 5 — Get the Trust Score
+
+```python
+score = sentinel.get_trust_score()
+print(f"Trust Score: {score['trust_score']:.1f} ({score['status']})")
+print(f"Posture: {score['posture_score']:.1f}  Behavior: {score['behavior_score']:.1f}")
+print(f"Open findings: {score['findings_count']}")
+```
+
+### What you see
+
+Console output per tool call:
+```
+[sentinel] Registered agent: 53f8ce02-... (my-langchain-agent)
+[sentinel] tool=search_crm                     anomaly=0.900 ⚠️
+[sentinel] tool=read_database                  anomaly=0.900 ⚠️
+[sentinel] tool=send_email                     anomaly=0.900 ⚠️
+
+[sentinel] Trust Score : 79.8 (WATCH)
+[sentinel] Posture     : 100.0
+[sentinel] Behavior    : 55.0
+[sentinel] Findings    : 0 open
+```
+
+> Anomaly scores start high (0.9) for a brand-new agent — the behavior engine builds a baseline over multiple runs. Routine calls drop toward 0.0 once patterns are established.
+
+### Reuse an agent across runs
+
+```python
+sentinel = SentinelCallbackHandler(
+    api_key="as_agt_...",
+    agent_id="53f8ce02-...",    # UUID from a previous run — keeps history intact
+)
+```
+
+### Run the full example
+
+```bash
+cd integrations/langchain
+python example.py
+```
+
+### Configuration reference
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `api_key` | required | AgentSentinel API key (`as_agt_…` or `as_adm_…`) |
+| `base_url` | `http://localhost:9000` | AgentSentinel API URL |
+| `agent_name` | auto-generated | Name shown in the dashboard |
+| `agent_id` | auto-registered | Pass an existing UUID to reuse an agent |
+| `agent_type` | `llm_agent` | Agent type label |
+| `model` | `None` | LLM model name |
+| `owner_team` | `None` | Team responsible for this agent |
+| `description` | `None` | Agent purpose (used by posture rules) |
