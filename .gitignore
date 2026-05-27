@@ -16,3 +16,4 @@ nginx/certs/*.crt
 nginx/certs/*.key
 nginx/certs/*.pem
 prompt/
+tmp/
