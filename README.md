@@ -992,7 +992,7 @@ pip install agentsentinel-cli               # scan only (no psutil/httpx)
 
 | Command | What it does |
 |---------|-------------|
-| `sentinel discover` | Find AI agents running in your environment — processes, ports, files, containers |
+| `sentinel discover` | Find AI agents running in your environment — processes, ports, subnets, files, containers |
 | `sentinel scan` | Deep-scan an agent file for misconfigurations, dangerous grants, and posture issues |
 
 ---
@@ -1008,34 +1008,43 @@ sentinel discover
 **Sample output:**
 
 ```
-╭────────────────────────────────────────────────╮
-│  AgentSentinel — Discover                      │
-│  Scanning: processes · network                 │
-╰────────────────────────────────────────────────╯
+╭───────────────────────────────────────────────────────────────╮
+│  AgentSentinel — Discover                                     │
+│  Scanning: processes · network · subnet (10.0.1.0/24)         │
+╰───────────────────────────────────────────────────────────────╯
 
-  PROCESS SCAN ─────────────────────────────────────────────────
-  
-  🔴  CRITICAL  mcp-shim           MCP + OpenAI        pid:62508
+  PROCESS SCAN ──────────────────────────────────────────────────
+
+  🔴  CRITICAL  mcp-shim           MCP + OpenAI              pid:62508
                 ⚠  API key exposed: OPENAI_API_KEY=sk-proj-...wcgA
                 LLM API key exposed in process environment
                 → sentinel scan --pid 62508
 
-  NETWORK SCAN ─────────────────────────────────────────────────
-  
-  🟢  LOW       agentsentinel:9000  AgentSentinel       port:9000
-                AgentSentinel monitoring platform — already registered
+  NETWORK SCAN ──────────────────────────────────────────────────
+
+  🟢  LOW       agentsentinel@127.0.0.1:9000  AgentSentinel   127.0.0.1:9000
+                AgentSentinel monitoring platform
                 → sentinel scan --connect http://127.0.0.1:9000
 
-  ⚪  UNKNOWN   openai-compat-api   OpenAI-compatible   port:11434
+  🟡  MEDIUM    llm-api@127.0.0.1:11434  OpenAI-compatible   127.0.0.1:11434
                 Model: llama3.2:latest
-                Local model server (Ollama)
+                OpenAI-compatible API with no authentication — open access
                 → sentinel scan --url http://127.0.0.1:11434
 
-  ──────────────────────────────────────────────────────────────
-  3 agents found · 1 CRITICAL · 1 LOW · 1 UNKNOWN
+  SUBNET SCAN ───────────────────────────────────────────────────
+
+  🟠  HIGH      mcp-server@10.0.1.45:8080  MCP Server        10.0.1.45:8080
+                MCP server with no authentication detected — inspect tools
+                → sentinel mcp scan http://10.0.1.45:8080/sse
+
+  ───────────────────────────────────────────────────────────────
+  4 agents found · 1 CRITICAL · 1 HIGH · 1 MEDIUM · 1 LOW
 
   ⚠  1 agent has an API key exposed in the environment.
-  Exposed keys are visible to all processes on this host.
+  Exposed keys are visible to all processes on this host. Rotate them
+  and move to a secrets manager.
+
+  Subnet scan: 10.0.1.0/24 — 254 hosts · 3 open ports · 4.2s
 ```
 
 #### Scan vectors
@@ -1044,8 +1053,11 @@ sentinel discover
 |------|--------------|----------|
 | `--process` *(default on)* | Running Python/Node processes making LLM API calls | `psutil` |
 | `--network` *(default on)* | Local ports for MCP servers, agent APIs, Ollama | `httpx` |
+| `--subnet CIDR` | Every host in an internal subnet — e.g. `10.0.0.0/24` | `httpx` |
 | `--path DIR` | Python source files in a directory | nothing extra |
 | `--docker` *(default off)* | Running Docker containers with LLM API key env vars | `docker` CLI |
+
+The subnet scan uses a two-phase approach: parallel TCP connect across all host:port combinations (fast), then targeted HTTP probes on open ports only to identify agent type. `/24` (254 hosts) typically completes in under 5 seconds.
 
 #### Usage examples
 
@@ -1058,6 +1070,12 @@ sentinel discover --docker
 
 # Scan a source directory for agent files
 sentinel discover --path ./agents/
+
+# Scan an internal subnet for AI agents across the network
+sentinel discover --subnet 10.0.0.0/24
+
+# Subnet scan with custom port range
+sentinel discover --subnet 10.0.0.0/24 --ports 8000-9001
 
 # Network scan only, custom port range
 sentinel discover --no-process --ports 8000-9001
