@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentsentinel-cli"
-version = "0.1.0"
-description = "One-command security scanner for AI agents — finds exfiltration paths, dangerous grants, and posture issues without a running server"
+version = "0.2.0"
+description = "Discover and scan AI agents — finds exfiltration paths, exposed API keys, and misconfigured agents across processes, network, files, and containers"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-keywords = ["ai-security", "llm", "agent-security", "langchain", "cli", "scanner", "devsecops"]
+keywords = ["ai-security", "llm", "agent-security", "langchain", "mcp", "openai", "cli", "scanner", "devsecops", "discovery"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -18,13 +18,28 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Environment :: Console",
 ]
+
+# Core — zero extra install needed for sentinel scan
 dependencies = [
     "click>=8.0.0",
     "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
-connect = ["httpx>=0.24.0"]   # needed for --connect flag
+# sentinel discover (process + network + docker scanning)
+discover = [
+    "psutil>=5.9.0",    # process scanning
+    "httpx>=0.24.0",    # network probing
+]
+# sentinel scan --connect (live behavior data from platform)
+connect = [
+    "httpx>=0.24.0",
+]
+# Install everything
+all = [
+    "psutil>=5.9.0",
+    "httpx>=0.24.0",
+]
 
 [project.scripts]
 sentinel = "agentsentinel_cli.cli:main"
