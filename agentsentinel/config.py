@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_WEAK_SECRET = "dev-secret-key-change-in-production"
+WEAK_SECRET = "dev-secret-key-change-in-production"
 
 
 class Settings(BaseSettings):
@@ -15,9 +15,23 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://REDACTED@localhost:5432/agentsentinel"
     redis_url: str = "redis://localhost:6379/0"
     slack_webhook_url: str | None = None
-    secret_key: str = _WEAK_SECRET
+    secret_key: str = WEAK_SECRET
     log_level: str = "INFO"
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
+
+    # Set SENTINEL_ALLOW_WEAK_SECRET=true in dev/test to suppress the startup refusal
+    # when SECRET_KEY is the insecure default. Never set this in production.
+    allow_weak_secret: bool = False
+
+    # Set SHOW_DOCS=true to enable /docs, /redoc, /openapi.json.
+    # Disabled by default — the OpenAPI schema is a reconnaissance resource.
+    show_docs: bool = False
+
+    # Optional path for secure bootstrap key delivery.
+    # When set, the plaintext bootstrap admin key is written to this file (mode 0600)
+    # instead of being printed to stderr. Use a mounted secrets volume in production:
+    #   BOOTSTRAP_KEY_FILE=/run/secrets/bootstrap-key
+    bootstrap_key_file: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -26,8 +40,7 @@ class Settings(BaseSettings):
     def validate_secret_key(cls, v: str) -> str:
         if len(v) < 32:
             raise ValueError("SECRET_KEY must be at least 32 characters")
-        if v == _WEAK_SECRET:
-            # Warn loudly — do not raise so dev/test environments still work
+        if v == WEAK_SECRET:
             warnings.warn(
                 "SECRET_KEY is the insecure default. Set a random SECRET_KEY before deploying.",
                 stacklevel=2,

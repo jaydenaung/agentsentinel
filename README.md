@@ -182,16 +182,23 @@ Restart the API to trigger the bootstrap key:
 docker compose restart api
 ```
 
-Wait 5 seconds, then grab the key from the logs:
+The bootstrap key is written to **stderr** on first startup. Retrieve it with:
 
 ```bash
-docker compose logs api | grep "as_adm_"
+docker compose logs api 2>&1 | grep -A 3 "BOOTSTRAP ADMIN KEY"
 ```
 
-You'll see a line like:
+You'll see a block like:
 ```
-"key": "as_adm_REDACTED_KEY_ROTATED"
+  AGENTSENTINEL BOOTSTRAP ADMIN KEY
+  Copy this now — it will not be shown again.
+
+  as_adm_<your-unique-key>
 ```
+
+> **Production deployments:** Set `BOOTSTRAP_KEY_FILE=/run/secrets/bootstrap-key` and mount
+> a writable secrets volume. The key will be written to that file (mode 0600) instead of
+> appearing in container logs.
 
 Copy it and add it to your `.env` file:
 

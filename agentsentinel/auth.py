@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated
 
 import structlog
@@ -65,7 +67,8 @@ async def _resolve_key(raw: str, db: AsyncSession) -> ApiKey:
     if key is None:
         raise HTTPException(status_code=401, detail="Invalid or revoked API key")
     key.last_used_at = datetime.now(timezone.utc)
-    await db.commit()
+    # flush (not commit) — let the outer get_db context manager own the transaction boundary
+    await db.flush()
     return key
 
 
@@ -102,13 +105,61 @@ require_agent = require_scope("admin", "agent")    # agents reporting events
 require_read  = require_scope("admin", "readonly")  # dashboards / monitoring
 
 
+# ── Bootstrap key delivery ────────────────────────────────────────────────────
+
+def _deliver_bootstrap_key(raw: str) -> None:
+    """Deliver the one-time bootstrap key to the operator securely.
+
+    Preferred: set BOOTSTRAP_KEY_FILE to a path on a mounted secrets volume.
+    The key is written there (mode 0600) and never appears in process output.
+
+    Fallback: the key is printed to stderr. WARNING — container runtimes
+    (ECS, Kubernetes) capture stderr and forward it to log aggregators
+    (CloudWatch, Datadog, Splunk). Treat container startup logs as sensitive
+    until the key has been rotated.
+    """
+    if settings.bootstrap_key_file:
+        try:
+            path = Path(settings.bootstrap_key_file)
+            path.write_text(raw, encoding="utf-8")
+            path.chmod(0o600)
+            log.info(
+                "bootstrap.key_written_to_file",
+                path=str(path),
+                key_prefix=key_prefix(raw),
+            )
+            print(
+                f"\n[AgentSentinel] Bootstrap admin key written to: {path}\n",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        except OSError as exc:
+            log.error(
+                "bootstrap.key_file_write_failed",
+                error=str(exc),
+                path=settings.bootstrap_key_file,
+            )
+            # Fall through to stderr delivery so the key is not silently lost
+
+    # Stderr fallback — visible in terminals; also captured by container log drivers
+    print("\n" + "=" * 70, file=sys.stderr)
+    print("  AGENTSENTINEL BOOTSTRAP ADMIN KEY", file=sys.stderr)
+    print("  Copy this now — it will not be shown again.", file=sys.stderr)
+    print(f"\n  {raw}\n", file=sys.stderr)
+    print("  Set it as AGENTSENTINEL_API_KEY in your .env file.", file=sys.stderr)
+    print("  PRODUCTION: set BOOTSTRAP_KEY_FILE=/run/secrets/bootstrap-key", file=sys.stderr)
+    print("  to avoid this key appearing in container log aggregators.", file=sys.stderr)
+    print("=" * 70 + "\n", file=sys.stderr, flush=True)
+
+
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 async def bootstrap_admin_key(db: AsyncSession) -> None:
     """Create an initial admin key if none exist.
 
-    Called once at application startup. The full plaintext key is printed to
-    stdout — copy it immediately, it will never be shown again.
+    Called once at application startup. The key is delivered via
+    BOOTSTRAP_KEY_FILE (if set) or stderr — it will never be shown again.
     """
     result = await db.execute(
         select(ApiKey).where(ApiKey.scope == "admin", ApiKey.is_active == True)  # noqa: E712
@@ -124,21 +175,16 @@ async def bootstrap_admin_key(db: AsyncSession) -> None:
         key_prefix=key_prefix(raw),
         key_hash=hash_key(raw),
         scope="admin",
+        agent_id=None,
         is_active=True,
     )
     db.add(key)
     await db.commit()
 
-    # Log only non-sensitive metadata — the plaintext key must never appear in logs
+    # Log only non-sensitive metadata — the plaintext key must never appear in structured logs
     log.info(
         "bootstrap.admin_key_created",
         message="No admin key found — created bootstrap key.",
         key_prefix=key_prefix(raw),
     )
-    # Print to stdout so it's visible at container startup; not stored in log aggregators
-    print("\n" + "=" * 70)
-    print("  AGENTSENTINEL BOOTSTRAP ADMIN KEY")
-    print("  Copy this now — it will not be shown again.")
-    print(f"\n  {raw}\n")
-    print("  Set it as AGENTSENTINEL_API_KEY in your environment or .env file.")
-    print("=" * 70 + "\n", flush=True)
+    _deliver_bootstrap_key(raw)
