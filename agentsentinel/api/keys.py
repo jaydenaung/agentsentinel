@@ -4,7 +4,7 @@ import uuid
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,8 +21,6 @@ from agentsentinel.schemas.api_key import ApiKeyCreate, ApiKeyCreatedResponse, A
 router = APIRouter(prefix="/keys", tags=["keys"])
 log = structlog.get_logger(__name__)
 
-_VALID_SCOPES = {"admin", "agent", "readonly"}
-
 
 @router.post("", response_model=ApiKeyCreatedResponse, status_code=201)
 async def create_key(
@@ -31,9 +29,6 @@ async def create_key(
     _: Annotated[ApiKey, Depends(require_admin)],
 ) -> ApiKeyCreatedResponse:
     """Create a new API key. Returns the plaintext key once — store it securely."""
-    if body.scope not in _VALID_SCOPES:
-        raise HTTPException(status_code=422, detail=f"scope must be one of {sorted(_VALID_SCOPES)}")
-
     raw = generate_raw_key(body.scope)
     key = ApiKey(
         id=uuid.uuid4(),
@@ -64,9 +59,13 @@ async def create_key(
 async def list_keys(
     db: Annotated[AsyncSession, Depends(get_db)],
     _: Annotated[ApiKey, Depends(require_admin)],
+    limit: int = Query(default=50, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> list[ApiKey]:
-    """List all API keys (prefix only — plaintext keys are never stored)."""
-    result = await db.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
+    """List API keys (prefix only — plaintext keys are never stored). Paginated."""
+    result = await db.execute(
+        select(ApiKey).order_by(ApiKey.created_at.desc()).limit(limit).offset(offset)
+    )
     return list(result.scalars().all())
 
 

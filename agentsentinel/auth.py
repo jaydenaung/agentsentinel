@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from fastapi.security import APIKeyHeader
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agentsentinel.config import settings
 from agentsentinel.database import get_db
 from agentsentinel.models.api_key import ApiKey
 
@@ -34,8 +36,16 @@ def generate_raw_key(scope: str) -> str:
 
 
 def hash_key(raw: str) -> str:
-    """SHA-256 hex digest of a plaintext key."""
-    return hashlib.sha256(raw.encode()).hexdigest()
+    """HMAC-SHA256 of the plaintext key using the server secret.
+
+    Using HMAC with a server-side secret prevents rainbow-table attacks against
+    the key_hash column even if the database is compromised.
+    """
+    return hmac.new(
+        settings.secret_key.encode(),
+        raw.encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def key_prefix(raw: str) -> str:
@@ -97,7 +107,7 @@ require_read  = require_scope("admin", "readonly")  # dashboards / monitoring
 async def bootstrap_admin_key(db: AsyncSession) -> None:
     """Create an initial admin key if none exist.
 
-    Called once at application startup. The full plaintext key is logged to
+    Called once at application startup. The full plaintext key is printed to
     stdout — copy it immediately, it will never be shown again.
     """
     result = await db.execute(
@@ -119,12 +129,13 @@ async def bootstrap_admin_key(db: AsyncSession) -> None:
     db.add(key)
     await db.commit()
 
+    # Log only non-sensitive metadata — the plaintext key must never appear in logs
     log.info(
         "bootstrap.admin_key_created",
-        message="No admin key found — created bootstrap key. Copy it now, it will not be shown again.",
-        key=raw,
+        message="No admin key found — created bootstrap key.",
+        key_prefix=key_prefix(raw),
     )
-    # Also print to stdout so it's visible even without a log aggregator
+    # Print to stdout so it's visible at container startup; not stored in log aggregators
     print("\n" + "=" * 70)
     print("  AGENTSENTINEL BOOTSTRAP ADMIN KEY")
     print("  Copy this now — it will not be shown again.")

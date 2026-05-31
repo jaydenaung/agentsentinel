@@ -1,0 +1,6 @@
+# Local development overrides — NOT for production use.
+# docker compose automatically merges this file.
+# Adds --reload so code changes are picked up without rebuilding the image.
+services:
+  api:
+    command: uvicorn agentsentinel.main:app --host 0.0.0.0 --port 8000 --reload

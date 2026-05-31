@@ -57,13 +57,16 @@ async def run_once() -> None:
                         agent_id=str(agent_id),
                         tool_name=tool_name,
                         error=str(exc),
+                        exc_info=True,
                     )
 
             await _refresh_grant_counts(db)
             await db.commit()
             log.info("worker.baseline_run_complete", pair_count=len(pairs))
         except Exception as exc:
-            log.error("worker.run_failed", error=str(exc))
+            # Explicit rollback ensures no partial writes persist across the failure
+            await db.rollback()
+            log.error("worker.run_failed", error=str(exc), exc_info=True)
 
 
 async def main() -> None:

@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentsentinel.models.baseline import Baseline
@@ -22,30 +22,23 @@ async def compute_baseline(
 ) -> Baseline:
     """Compute or refresh the hourly call-rate baseline for an agent+tool pair.
 
-    Queries the last ``window_days`` of AgentEvent rows, buckets by hour,
-    then computes mean and stddev. Upserts the result into the Baseline table.
+    Aggregates event counts per hour in the database — never loads raw timestamps
+    into Python memory, so memory usage is O(distinct hours) regardless of event volume.
     """
     since = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
 
-    # Fetch all events for this agent+tool in the window
+    # Push bucketing into the DB: one row per hour with its event count
+    bucket_col = func.date_trunc("hour", AgentEvent.timestamp).label("hour")
     result = await db.execute(
-        select(AgentEvent.timestamp).where(
+        select(bucket_col, func.count().label("cnt"))
+        .where(
             AgentEvent.agent_id == agent_id,
             AgentEvent.tool_name == tool_name,
             AgentEvent.timestamp >= since,
         )
+        .group_by(bucket_col)
     )
-    timestamps = [row[0] for row in result.all()]
-
-    if not timestamps:
-        counts_per_hour: list[int] = []
-    else:
-        # Build a map of hour → count
-        hour_counts: dict[datetime, int] = {}
-        for ts in timestamps:
-            bucket = ts.replace(minute=0, second=0, microsecond=0)
-            hour_counts[bucket] = hour_counts.get(bucket, 0) + 1
-        counts_per_hour = list(hour_counts.values())
+    counts_per_hour = [row.cnt for row in result.all()]
 
     sample_count = len(counts_per_hour)
     mean = sum(counts_per_hour) / sample_count if sample_count else 0.0

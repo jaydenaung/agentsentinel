@@ -15,6 +15,11 @@ from agentsentinel.posture.scanner import run_posture_scan
 
 log = structlog.get_logger(__name__)
 
+# Minimum events required in the recency window to earn the bonus.
+# A single fake event must not be enough to claim +10 points.
+_RECENCY_MIN_EVENTS = 5
+_RECENCY_WINDOW_HOURS = 1
+
 
 def derive_status(score: float) -> str:
     """Map a numeric trust score to a status label."""
@@ -30,8 +35,12 @@ def derive_status(score: float) -> str:
 
 
 async def _recency_bonus(agent_id: uuid.UUID, db: AsyncSession) -> float:
-    """Return 10 if the agent was seen in the last 5 minutes, else 0."""
-    since = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
+    """Return 10 if the agent has >= _RECENCY_MIN_EVENTS events in the last hour, else 0.
+
+    Requiring a minimum event count prevents an attacker from sending a single
+    fake event every few minutes to permanently hold a +10 score inflation.
+    """
+    since = datetime.now(tz=timezone.utc) - timedelta(hours=_RECENCY_WINDOW_HOURS)
     result = await db.execute(
         select(func.count()).where(
             AgentEvent.agent_id == agent_id,
@@ -39,7 +48,7 @@ async def _recency_bonus(agent_id: uuid.UUID, db: AsyncSession) -> float:
         )
     )
     count = result.scalar_one()
-    return 10.0 if count > 0 else 0.0
+    return 10.0 if count >= _RECENCY_MIN_EVENTS else 0.0
 
 
 async def compute_trust_score(agent_id: uuid.UUID, db: AsyncSession) -> dict:

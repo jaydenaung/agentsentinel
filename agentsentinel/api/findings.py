@@ -27,14 +27,16 @@ async def list_findings(
     db: Annotated[AsyncSession, Depends(get_db)],
     status: Annotated[str | None, Query()] = None,
     severity: Annotated[str | None, Query()] = None,
+    limit: int = Query(default=50, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> list[Finding]:
-    """List all findings for an agent, optionally filtered by status and severity."""
+    """List findings for an agent, optionally filtered by status and severity. Paginated."""
     stmt = select(Finding).where(Finding.agent_id == agent_id)
     if status:
         stmt = stmt.where(Finding.status == status)
     if severity:
         stmt = stmt.where(Finding.severity == severity)
-    stmt = stmt.order_by(Finding.created_at.desc())
+    stmt = stmt.order_by(Finding.created_at.desc()).limit(limit).offset(offset)
     result = await db.execute(stmt)
     return list(result.scalars().all())
 

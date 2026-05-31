@@ -15,6 +15,7 @@ from agentsentinel.behavior.collector import ingest_event
 from agentsentinel.database import get_db
 from agentsentinel.dependencies import get_redis
 from agentsentinel.models.agent import Agent
+from agentsentinel.models.api_key import ApiKey
 from agentsentinel.models.event import AgentEvent
 from agentsentinel.schemas.event import EventIngest, EventListItem, EventResponse
 
@@ -22,13 +23,25 @@ router = APIRouter(prefix="/events", tags=["events"])
 log = structlog.get_logger(__name__)
 
 
-@router.get("", response_model=list[EventListItem], dependencies=[Depends(require_read)])
+@router.get("", response_model=list[EventListItem])
 async def list_events(
+    key: Annotated[ApiKey, Depends(require_read)],
     db: Annotated[AsyncSession, Depends(get_db)],
     agent_id: uuid.UUID | None = Query(default=None),
     limit: int = Query(default=50, le=200),
 ) -> list[EventListItem]:
-    """Return the most recent tool-call events, newest first."""
+    """Return the most recent tool-call events, newest first.
+
+    readonly keys must supply agent_id — omitting it would expose events from
+    every monitored agent to any holder of a readonly key (cross-tenant leakage).
+    admin keys may omit agent_id to retrieve the global event stream.
+    """
+    if key.scope == "readonly" and agent_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="agent_id query parameter is required for readonly keys",
+        )
+
     stmt = (
         select(AgentEvent, Agent.name.label("agent_name"))
         .join(Agent, Agent.id == AgentEvent.agent_id)

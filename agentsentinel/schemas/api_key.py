@@ -2,15 +2,16 @@
 
 import uuid
 from datetime import datetime
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiKeyCreate(BaseModel):
     """Request body for creating an API key."""
 
-    name: str
-    scope: str  # admin | agent | readonly
+    name: Annotated[str, Field(min_length=1, max_length=255)]
+    scope: Literal["admin", "agent", "readonly"]
 
 
 class ApiKeyResponse(BaseModel):

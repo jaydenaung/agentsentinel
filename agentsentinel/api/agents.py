@@ -25,6 +25,30 @@ from agentsentinel.schemas.agent import (
 router = APIRouter(prefix="/agents", tags=["agents"])
 log = structlog.get_logger(__name__)
 
+# Tool classification patterns — duplicated from cli/scanner.py intentionally
+# (separate package; avoids cross-package import coupling)
+_WRITE_PATTERNS = frozenset({
+    "write", "edit", "create", "delete", "remove", "move", "rename",
+    "execute", "run", "exec", "patch", "update", "insert", "drop",
+    "truncate", "send", "post", "put", "upload", "deploy", "reset", "kill",
+})
+_DANGEROUS_PATTERNS = frozenset({
+    "delete", "remove", "drop", "truncate", "execute", "run", "exec",
+    "send", "deploy", "reset", "kill",
+})
+
+
+def _classify_tool(name: str) -> tuple[str, bool]:
+    """Derive (scope, is_dangerous) from a tool name server-side.
+
+    Callers must not supply these values — server-side derivation prevents
+    agents from self-classifying dangerous tools as safe to bypass posture rules.
+    """
+    lower = name.lower()
+    is_dangerous = any(p in lower for p in _DANGEROUS_PATTERNS)
+    is_write = is_dangerous or any(p in lower for p in _WRITE_PATTERNS)
+    return ("write" if is_write else "read"), is_dangerous
+
 
 @router.post("", response_model=AgentResponse, status_code=201,
              dependencies=[Depends(require_admin)])
@@ -46,13 +70,16 @@ async def list_agents(
     db: Annotated[AsyncSession, Depends(get_db)],
     status: Annotated[str | None, Query()] = None,
     owner_team: Annotated[str | None, Query()] = None,
+    limit: int = Query(default=50, le=500),
+    offset: int = Query(default=0, ge=0),
 ) -> list[Agent]:
-    """List all registered agents with optional filtering."""
+    """List registered agents with optional filtering. Paginated."""
     stmt = select(Agent)
     if status:
         stmt = stmt.where(Agent.status == status)
     if owner_team:
         stmt = stmt.where(Agent.owner_team == owner_team)
+    stmt = stmt.order_by(Agent.created_at.desc()).limit(limit).offset(offset)
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
@@ -82,11 +109,22 @@ async def add_grant(
     body: ToolGrantCreate,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ToolGrant:
-    """Add a tool grant to an agent."""
+    """Add a tool grant to an agent.
+
+    scope and is_dangerous are derived server-side from the tool name —
+    any caller-supplied values would be ignored even if the schema accepted them.
+    """
     agent = await db.get(Agent, agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    grant = ToolGrant(agent_id=agent_id, **body.model_dump())
+    scope, is_dangerous = _classify_tool(body.tool_name)
+    grant = ToolGrant(
+        agent_id=agent_id,
+        tool_name=body.tool_name,
+        scope=scope,
+        is_dangerous=is_dangerous,
+        rate_limit_per_hour=body.rate_limit_per_hour,
+    )
     db.add(grant)
     await db.flush()
     return grant

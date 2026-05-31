@@ -32,7 +32,8 @@ async def compute_behavior_score(agent_id: uuid.UUID, db: AsyncSession) -> float
 
     if not scores:
         agent = await db.get(Agent, agent_id)
-        fallback = agent.behavior_score if (agent and agent.behavior_score is not None) else 75.0
+        # Default to 50 (neutral) — a 75 default could be gamed by starving the agent of events
+        fallback = agent.behavior_score if (agent and agent.behavior_score is not None) else 50.0
         log.info(
             "behavior_score.no_recent_events",
             agent_id=str(agent_id),

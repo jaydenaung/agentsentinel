@@ -1,5 +1,7 @@
 """Slack webhook alerting for CRITICAL findings."""
 
+from urllib.parse import urlparse
+
 import httpx
 import structlog
 
@@ -7,6 +9,19 @@ from agentsentinel.config import settings
 from agentsentinel.models.finding import Finding
 
 log = structlog.get_logger(__name__)
+
+
+def _is_safe_webhook_url(url: str) -> bool:
+    """Defense-in-depth check: ensure the URL still targets hooks.slack.com over HTTPS.
+
+    The config validator catches bad values at startup, but this guard prevents
+    runtime exploitation if the URL is sourced from a mutable config store.
+    """
+    parsed = urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and (parsed.netloc == "hooks.slack.com" or parsed.netloc.endswith(".hooks.slack.com"))
+    )
 
 
 async def send_critical_alert(finding: Finding, agent_name: str) -> bool:
@@ -17,6 +32,10 @@ async def send_critical_alert(finding: Finding, agent_name: str) -> bool:
     """
     if not settings.slack_webhook_url:
         log.debug("slack.no_webhook_configured")
+        return False
+
+    if not _is_safe_webhook_url(settings.slack_webhook_url):
+        log.error("slack.webhook_url_blocked", reason="URL did not pass SSRF safety check")
         return False
 
     payload = {
