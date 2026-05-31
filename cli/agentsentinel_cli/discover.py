@@ -4,6 +4,7 @@ sentinel discover — finds AI agents across processes, network, files, and Dock
 Scan vectors:
   process   running Python/Node processes making LLM API calls
   network   open ports serving MCP SSE endpoints or agent APIs
+  subnet    CIDR subnet scan — finds agents across an internal network
   files     Python source files in a directory containing agent patterns
   docker    Docker containers with LLM API keys in their environment
 """
@@ -11,9 +12,11 @@ Scan vectors:
 from __future__ import annotations
 
 import dataclasses
+import ipaddress
 import json
 import socket
 import subprocess
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
@@ -31,12 +34,12 @@ from agentsentinel_cli.frameworks import (
 
 @dataclasses.dataclass
 class DiscoveredAgent:
-    source: str            # process | network | file | docker
+    source: str            # process | network | subnet | file | docker
     name: str              # human-readable name
     framework: str         # LangChain | OpenAI Agents SDK | MCP | etc.
     provider: str          # Anthropic | OpenAI | Google | etc.
     model: str             # claude-sonnet | gpt-4o | etc.  (empty if unknown)
-    location: str          # pid:1234 | port:8080 | /path/file.py | container:name
+    location: str          # pid:1234 | 10.0.1.45:8080 | /path/file.py | container:name
     api_keys: list[str]    # masked keys: ANTHROPIC_API_KEY=sk-ant-...5f3d
     live_connections: list[str]   # LLM API hosts this process is talking to
     risk: str              # CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN
@@ -44,7 +47,17 @@ class DiscoveredAgent:
     next_step: str         # suggested follow-up command
 
 
-# ── Default port list for network scan ────────────────────────────────────────
+@dataclasses.dataclass
+class SubnetScanStats:
+    cidr: str
+    total_hosts: int
+    hosts_scanned: int
+    open_ports_found: int
+    agents_found: int
+    elapsed_seconds: float
+
+
+# ── Default port list ─────────────────────────────────────────────────────────
 
 _DEFAULT_PORTS = [
     3000, 3001, 4000, 5000,
@@ -58,13 +71,14 @@ _DEFAULT_PORTS = [
 _MCP_INDICATOR_PATHS   = ["/sse", "/messages/"]
 _OPENAI_COMPAT_PATHS   = ["/v1/models"]
 _SENTINEL_PATHS        = ["/api/v1/agents", "/health"]
-_AGENT_FRAMEWORK_PATHS = ["/api/agents", "/v1/runs", "/runs"]
+
+# Subnet scan limits — scanning beyond these sizes is impractical
+_MAX_SUBNET_HOSTS_WARN  = 1024    # /22 — warn but allow
+_MAX_SUBNET_HOSTS_BLOCK = 65536   # /16 — refuse (too slow, too noisy)
 
 
 # ── Process scanner ───────────────────────────────────────────────────────────
 
-# IDE, language server, build tool, and OS helper processes that inherit shell
-# env vars. They are not AI agents — flagging them creates noise.
 _PROCESS_SKIP_FRAGMENTS = frozenset({
     "lsp-server", "lsp-runner", "lsp-worker",
     "server.bundle",
@@ -76,8 +90,6 @@ _PROCESS_SKIP_FRAGMENTS = frozenset({
     "safari", "firefox", "chrome helper",
 })
 
-# cmdline fragments that STRONGLY indicate an actual AI agent framework.
-# Env-var inheritance alone (every shell child has the same vars) is insufficient.
 _AGENT_CMDLINE_SIGNALS = frozenset({
     "langchain", "crewai", "autogen", "pyautogen",
     "openai.agents", "agents_sdk",
@@ -90,23 +102,14 @@ _AGENT_CMDLINE_SIGNALS = frozenset({
 
 
 def scan_processes() -> list[DiscoveredAgent]:
-    """Scan running processes for AI agents using psutil.
-
-    A process is only flagged when it shows STRONG evidence of being an agent:
-      - Active TCP connection to a known LLM API host, OR
-      - Agent framework keyword in its command line
-
-    Processes that merely inherit LLM API keys from the shell (IDE helpers,
-    language servers, build tools) are filtered to prevent noise.
-    Duplicate process names with identical signals are deduplicated.
-    """
+    """Scan running processes for AI agents using psutil."""
     try:
         import psutil
     except ImportError:
         return []
 
     found: list[DiscoveredAgent] = []
-    seen: set[tuple[str, str, str]] = set()  # (name, framework, first_key)
+    seen: set[tuple[str, str, str]] = set()
 
     for proc in psutil.process_iter(["pid", "name", "cmdline", "status"]):
         try:
@@ -117,7 +120,6 @@ def scan_processes() -> list[DiscoveredAgent]:
             if not cmdline:
                 continue
 
-            # Skip known non-agent processes
             if any(skip in proc_name for skip in _PROCESS_SKIP_FRAGMENTS):
                 continue
 
@@ -126,7 +128,6 @@ def scan_processes() -> list[DiscoveredAgent]:
             if not any(p in cmd_str for p in ("python", "node", "npx", "deno")):
                 continue
 
-            # ── Strong-signal gate ────────────────────────────────────────────
             has_framework_in_cmd = any(s in cmd_str for s in _AGENT_CMDLINE_SIGNALS)
 
             live_connections: list[str] = []
@@ -143,9 +144,8 @@ def scan_processes() -> list[DiscoveredAgent]:
                 pass
 
             if not has_framework_in_cmd and not live_connections:
-                continue  # env-var inheritance alone — skip
+                continue
 
-            # ── Gather details ────────────────────────────────────────────────
             try:
                 env = proc.environ()
             except (psutil.AccessDenied, psutil.NoSuchProcess):
@@ -159,7 +159,6 @@ def scan_processes() -> list[DiscoveredAgent]:
             model = detect_model(cmd_str) or detect_model(" ".join(env.values()))
             name = _name_from_cmdline(cmdline)
 
-            # Deduplicate: same agent name + same framework + same first key
             dedup_key = (name, framework, api_keys[0] if api_keys else "")
             if dedup_key in seen:
                 continue
@@ -188,12 +187,10 @@ def scan_processes() -> list[DiscoveredAgent]:
 
 
 def _name_from_cmdline(cmdline: list[str]) -> str:
-    """Extract a human-readable agent name from a process command line."""
     for part in reversed(cmdline):
         p = Path(part)
         if p.suffix in (".py", ".js", ".ts") and p.stem not in ("__main__", "-c"):
             return p.stem.replace("_", "-")
-    # Fall back to the command itself
     for part in cmdline:
         if part and not part.startswith("-"):
             return Path(part).stem or part
@@ -218,14 +215,14 @@ def _assess_process_risk(
     return "UNKNOWN", "AI-related process detected — framework not identified"
 
 
-# ── Network scanner ───────────────────────────────────────────────────────────
+# ── Network scanner (single host) ─────────────────────────────────────────────
 
 def scan_network(
     host: str = "127.0.0.1",
     ports: list[int] | None = None,
     timeout: float = 0.5,
 ) -> list[DiscoveredAgent]:
-    """Probe local ports for AI agent endpoints (MCP, OpenAI-compat, AgentSentinel)."""
+    """Probe a single host's ports for AI agent endpoints."""
     if ports is None:
         ports = _DEFAULT_PORTS
 
@@ -242,7 +239,7 @@ def scan_network(
 
 
 def _find_open_ports(host: str, ports: list[int], timeout: float) -> list[int]:
-    """Fast parallel TCP connect check."""
+    """Fast parallel TCP connect to find open ports on a single host."""
     open_ports: list[int] = []
 
     def check(port: int) -> int | None:
@@ -252,7 +249,7 @@ def _find_open_ports(host: str, ports: list[int], timeout: float) -> list[int]:
         except (OSError, ConnectionRefusedError):
             return None
 
-    with ThreadPoolExecutor(max_workers=50) as pool:
+    with ThreadPoolExecutor(max_workers=min(50, len(ports))) as pool:
         for result in as_completed({pool.submit(check, p): p for p in ports}):
             r = result.result()
             if r is not None:
@@ -260,6 +257,105 @@ def _find_open_ports(host: str, ports: list[int], timeout: float) -> list[int]:
 
     return sorted(open_ports)
 
+
+# ── Subnet scanner (CIDR range) ───────────────────────────────────────────────
+
+def enumerate_hosts(cidr: str) -> list[str]:
+    """Expand a CIDR string into a list of usable host IP strings."""
+    network = ipaddress.ip_network(cidr, strict=False)
+    # For /31 and /32, include network address too (point-to-point / single host)
+    if network.prefixlen >= 31:
+        return [str(ip) for ip in network]
+    return [str(ip) for ip in network.hosts()]
+
+
+def scan_subnet(
+    cidr: str,
+    ports: list[int] | None = None,
+    timeout: float = 0.3,
+    on_progress: Optional[Callable[[int, int, str], None]] = None,
+) -> tuple[list[DiscoveredAgent], SubnetScanStats]:
+    """Scan every host in a CIDR subnet for AI agent endpoints.
+
+    Uses a two-phase approach:
+      Phase 1 — parallel TCP connect across all host:port combinations (fast)
+      Phase 2 — HTTP probe on every open port to identify agent type (targeted)
+
+    Args:
+        cidr:        Network range, e.g. "10.0.0.0/24"
+        ports:       Port list to probe (default: _DEFAULT_PORTS)
+        timeout:     Per-connection TCP timeout in seconds
+        on_progress: Optional callback(completed, total, current_ip) for progress display
+
+    Returns:
+        (agents, stats) tuple
+    """
+    import time
+
+    if ports is None:
+        ports = _DEFAULT_PORTS
+
+    hosts = enumerate_hosts(cidr)
+    if not hosts:
+        raise ValueError(f"No usable hosts in {cidr}")
+
+    if len(hosts) > _MAX_SUBNET_HOSTS_BLOCK:
+        raise ValueError(
+            f"{cidr} contains {len(hosts):,} hosts. "
+            f"Maximum supported is {_MAX_SUBNET_HOSTS_BLOCK:,} (/{32 - _MAX_SUBNET_HOSTS_BLOCK.bit_length() + 1}). "
+            "Use a smaller subnet or scan individual host ranges."
+        )
+
+    started_at = time.monotonic()
+    total_probes = len(hosts) * len(ports)
+    open_targets: list[tuple[str, int]] = []
+
+    # ── Phase 1: parallel TCP connect across all host:port pairs ─────────────
+    # High concurrency — most connections refuse immediately, failures are cheap.
+    completed = 0
+    workers = min(250, total_probes)
+
+    def check_port(host: str, port: int) -> tuple[str, int] | None:
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return (host, port)
+        except (OSError, ConnectionRefusedError, socket.timeout):
+            return None
+
+    tasks = [(h, p) for h in hosts for p in ports]
+    futures = {}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(check_port, h, p): (h, p) for h, p in tasks}
+        for future in as_completed(futures):
+            result = future.result()
+            if result:
+                open_targets.append(result)
+            completed += 1
+            if on_progress:
+                host_ip, _ = futures[future]
+                on_progress(completed, total_probes, host_ip)
+
+    # ── Phase 2: HTTP probe on open ports to identify agent type ─────────────
+    found: list[DiscoveredAgent] = []
+    for host_ip, port in open_targets:
+        agent = _probe_port(host_ip, port, timeout * 8)
+        if agent:
+            found.append(agent)
+
+    elapsed = time.monotonic() - started_at
+    stats = SubnetScanStats(
+        cidr=cidr,
+        total_hosts=len(hosts),
+        hosts_scanned=len(hosts),
+        open_ports_found=len(open_targets),
+        agents_found=len(found),
+        elapsed_seconds=elapsed,
+    )
+    return found, stats
+
+
+# ── Port prober ───────────────────────────────────────────────────────────────
 
 def _probe_port(host: str, port: int, timeout: float) -> DiscoveredAgent | None:
     """Make HTTP requests to an open port and detect what kind of agent it is."""
@@ -269,9 +365,11 @@ def _probe_port(host: str, port: int, timeout: float) -> DiscoveredAgent | None:
         return None
 
     base = f"http://{host}:{port}"
+    location = f"{host}:{port}"
 
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
-        # Try MCP SSE endpoint
+
+        # MCP SSE server
         for path in _MCP_INDICATOR_PATHS:
             try:
                 r = client.get(f"{base}{path}", headers={"Accept": "text/event-stream"})
@@ -282,42 +380,48 @@ def _probe_port(host: str, port: int, timeout: float) -> DiscoveredAgent | None:
                 ):
                     return DiscoveredAgent(
                         source="network",
-                        name=f"mcp-server:{port}",
+                        name=f"mcp-server@{location}",
                         framework="MCP Server",
                         provider="",
                         model="",
-                        location=f"port:{port}",
+                        location=location,
                         api_keys=[],
                         live_connections=[],
-                        risk="UNKNOWN",
-                        risk_reason="MCP server — run 'sentinel scan --url' to inspect tools",
-                        next_step=f"sentinel scan --url {base}/sse",
+                        risk="HIGH",
+                        risk_reason="MCP server with no authentication detected — inspect tools",
+                        next_step=f"sentinel mcp scan {base}/sse",
                     )
             except httpx.RequestError:
                 pass
 
-        # Try OpenAI-compatible API
+        # OpenAI-compatible API (Ollama, LiteLLM, vLLM, etc.)
         for path in _OPENAI_COMPAT_PATHS:
             try:
                 r = client.get(f"{base}{path}")
                 if r.status_code in (200, 401) and _looks_like_openai_api(r):
+                    model = _extract_model_from_response(r)
+                    auth_required = r.status_code == 401
                     return DiscoveredAgent(
                         source="network",
-                        name=f"openai-compat-api:{port}",
+                        name=f"llm-api@{location}",
                         framework="OpenAI-compatible API",
                         provider="",
-                        model=_extract_model_from_response(r),
-                        location=f"port:{port}",
+                        model=model,
+                        location=location,
                         api_keys=[],
                         live_connections=[],
-                        risk="UNKNOWN",
-                        risk_reason="OpenAI-compatible API — could be local model server or proxy",
+                        risk="LOW" if auth_required else "MEDIUM",
+                        risk_reason=(
+                            "OpenAI-compatible API (auth required)"
+                            if auth_required
+                            else "OpenAI-compatible API with no authentication — open access"
+                        ),
                         next_step=f"sentinel scan --url {base}",
                     )
             except httpx.RequestError:
                 pass
 
-        # Try AgentSentinel platform
+        # AgentSentinel platform
         try:
             r = client.get(f"{base}/health")
             if r.status_code == 200 and r.text.strip().startswith("{"):
@@ -325,18 +429,43 @@ def _probe_port(host: str, port: int, timeout: float) -> DiscoveredAgent | None:
                 if "status" in body:
                     return DiscoveredAgent(
                         source="network",
-                        name=f"agentsentinel:{port}",
+                        name=f"agentsentinel@{location}",
                         framework="AgentSentinel",
                         provider="",
                         model="",
-                        location=f"port:{port}",
+                        location=location,
                         api_keys=[],
                         live_connections=[],
                         risk="LOW",
-                        risk_reason="AgentSentinel monitoring platform — already registered",
-                        next_step=f"sentinel scan --connect http://{host}:{port}",
+                        risk_reason="AgentSentinel monitoring platform",
+                        next_step=f"sentinel scan --connect http://{location}",
                     )
         except (httpx.RequestError, Exception):
+            pass
+
+        # Generic agent API (LangChain server, FastAPI agent, etc.)
+        try:
+            r = client.get(f"{base}/api/v1/agents")
+            if r.status_code in (200, 401, 403):
+                auth_required = r.status_code in (401, 403)
+                return DiscoveredAgent(
+                    source="network",
+                    name=f"agent-api@{location}",
+                    framework="Unknown Agent API",
+                    provider="",
+                    model="",
+                    location=location,
+                    api_keys=[],
+                    live_connections=[],
+                    risk="MEDIUM" if not auth_required else "LOW",
+                    risk_reason=(
+                        "Agent API endpoint detected (auth required)"
+                        if auth_required
+                        else "Agent API endpoint with no authentication"
+                    ),
+                    next_step=f"sentinel scan --url {base}",
+                )
+        except httpx.RequestError:
             pass
 
     return None
@@ -396,7 +525,6 @@ def scan_files(path: Path) -> list[DiscoveredAgent]:
 
 
 def _infer_framework_from_tools(agent) -> str:
-    """Guess framework from tool detection source tags."""
     sources = {t.source for t in agent.tools}
     if "BaseTool subclass" in sources or "StructuredTool" in str(sources):
         return "LangChain"
@@ -450,14 +578,12 @@ def scan_docker() -> list[DiscoveredAgent]:
             container_name = container.get("Names", "unknown").lstrip("/")
             image = container.get("Image", "")
 
-            # Inspect the container for environment variables
             env = _docker_inspect_env(container_id)
             if not env:
                 continue
 
             has_llm_env = any(var in env for var in LLM_ENV_VARS)
             if not has_llm_env:
-                # Check image name for agent signals
                 framework, provider = detect_framework(image)
                 if framework == "Unknown":
                     continue
@@ -492,16 +618,13 @@ def scan_docker() -> list[DiscoveredAgent]:
 
 def _docker_available() -> bool:
     try:
-        result = subprocess.run(
-            ["docker", "info"], capture_output=True, timeout=5
-        )
+        result = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
 def _docker_inspect_env(container_id: str) -> dict[str, str]:
-    """Return environment variables for a container as a dict."""
     try:
         result = subprocess.run(
             ["docker", "inspect", "--format",
@@ -526,9 +649,15 @@ def run_discovery(
     do_docker: bool = False,
     scan_path: Optional[Path] = None,
     ports: list[int] | None = None,
-) -> list[DiscoveredAgent]:
-    """Run all requested discovery scanners and return deduplicated results."""
+    subnet: Optional[str] = None,
+    subnet_progress_cb: Optional[Callable[[int, int, str], None]] = None,
+) -> tuple[list[DiscoveredAgent], Optional[SubnetScanStats]]:
+    """Run all requested discovery scanners.
+
+    Returns (agents, subnet_stats). subnet_stats is None when no subnet scan ran.
+    """
     results: list[DiscoveredAgent] = []
+    subnet_stats: Optional[SubnetScanStats] = None
 
     if do_process:
         results.extend(scan_processes())
@@ -536,13 +665,21 @@ def run_discovery(
     if do_network:
         results.extend(scan_network(ports=ports))
 
+    if subnet:
+        agents, subnet_stats = scan_subnet(
+            cidr=subnet,
+            ports=ports,
+            on_progress=subnet_progress_cb,
+        )
+        results.extend(agents)
+
     if scan_path:
         results.extend(scan_files(scan_path))
 
     if do_docker:
         results.extend(scan_docker())
 
-    return results
+    return results, subnet_stats
 
 
 # ── JSON serialisation ────────────────────────────────────────────────────────

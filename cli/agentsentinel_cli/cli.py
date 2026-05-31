@@ -109,6 +109,8 @@ def _enrich_from_platform(agents, scores_map, connect_url, api_key):
               help="Inspect running Docker containers.")
 @click.option("--path", "scan_path", default=None, type=click.Path(exists=True, path_type=Path),
               metavar="DIR", help="Scan a directory for agent source files.")
+@click.option("--subnet", default=None, metavar="CIDR",
+              help="Scan a CIDR subnet for AI agent endpoints, e.g. 10.0.0.0/24.")
 @click.option("--ports", default=None, metavar="RANGE",
               help="Custom port range for network scan, e.g. 8000-9001. Defaults to common agent ports.")
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text",
@@ -120,6 +122,7 @@ def discover(
     network: bool,
     docker: bool,
     scan_path: Path | None,
+    subnet: str | None,
     ports: str | None,
     fmt: str,
     verbose: bool,
@@ -134,12 +137,13 @@ def discover(
         sentinel discover                        scan processes + network
         sentinel discover --docker               include Docker containers
         sentinel discover --path ./agents        scan a source directory
+        sentinel discover --subnet 10.0.0.0/24   scan internal subnet
         sentinel discover --no-process           network scan only
         sentinel discover --ports 8000-9001      custom port range
         sentinel discover --format json          machine-readable output
     """
     from agentsentinel_cli.discover import run_discovery, as_json as discover_json
-    from agentsentinel_cli.discover_report import print_discover_result
+    from agentsentinel_cli.discover_report import print_discover_result, print_subnet_progress
 
     # Parse port range
     port_list = _parse_ports(ports) if ports else None
@@ -150,6 +154,8 @@ def discover(
         vectors.append("processes")
     if network:
         vectors.append("network")
+    if subnet:
+        vectors.append(f"subnet ({subnet})")
     if scan_path:
         vectors.append(f"files ({scan_path})")
     if docker:
@@ -157,25 +163,30 @@ def discover(
 
     if not vectors:
         console.print("[yellow]No scan vectors selected — use at least one of: "
-                      "--process, --network, --path, --docker[/yellow]")
+                      "--process, --network, --subnet, --path, --docker[/yellow]")
         sys.exit(1)
 
     if fmt == "text":
         _warn_missing_deps(process, network)
 
-    agents = run_discovery(
+    # Progress callback for subnet scan — only in text mode
+    progress_cb = print_subnet_progress if (subnet and fmt == "text") else None
+
+    agents, subnet_stats = run_discovery(
         do_process=process,
         do_network=network,
         do_docker=docker,
         scan_path=scan_path,
         ports=port_list,
+        subnet=subnet,
+        subnet_progress_cb=progress_cb,
     )
 
     if fmt == "json":
         click.echo(discover_json(agents))
         return
 
-    print_discover_result(agents, vectors=vectors, verbose=verbose)
+    print_discover_result(agents, vectors=vectors, verbose=verbose, subnet_stats=subnet_stats)
 
     # Exit 1 if any CRITICAL agents found (useful for CI)
     if any(a.risk == "CRITICAL" for a in agents):

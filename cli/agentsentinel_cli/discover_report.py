@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
-from rich import box
-from rich.text import Text
 from rich.rule import Rule
+from rich.text import Text
 
-from agentsentinel_cli.discover import DiscoveredAgent
+from agentsentinel_cli.discover import DiscoveredAgent, SubnetScanStats
 
 console = Console()
 
@@ -30,15 +28,29 @@ _RISK_ICON = {
 _SOURCE_LABEL = {
     "process": "PROCESS",
     "network": "NETWORK",
+    "subnet":  "SUBNET",
     "file":    "FILE",
     "docker":  "DOCKER",
 }
+
+
+def print_subnet_progress(completed: int, total: int, current_ip: str) -> None:
+    """Inline progress updater for subnet scan — overwrites the same line."""
+    pct = int(completed / total * 100) if total else 0
+    console.print(
+        f"\r  [dim]Scanning {current_ip} … {pct}% ({completed}/{total})[/dim]",
+        end="",
+        highlight=False,
+    )
+    if completed == total:
+        console.print()  # newline when done
 
 
 def print_discover_result(
     agents: list[DiscoveredAgent],
     vectors: list[str],
     verbose: bool = False,
+    subnet_stats: SubnetScanStats | None = None,
 ) -> None:
     console.print()
     console.print(Panel.fit(
@@ -51,6 +63,13 @@ def print_discover_result(
 
     if not agents:
         console.print("  [green]✓  No AI agents found in the scanned environment.[/green]")
+        if subnet_stats:
+            console.print(
+                f"  [dim]Subnet scan: {subnet_stats.cidr} — "
+                f"{subnet_stats.hosts_scanned:,} host{'s' if subnet_stats.hosts_scanned != 1 else ''} · "
+                f"{subnet_stats.open_ports_found} open port{'s' if subnet_stats.open_ports_found != 1 else ''} · "
+                f"{subnet_stats.elapsed_seconds:.1f}s[/dim]"
+            )
         console.print()
         console.print("  [dim]Tip: use [bold]--path ./your/code[/bold] to scan source files, "
                       "or [bold]--docker[/bold] to inspect containers.[/dim]")
@@ -75,7 +94,7 @@ def print_discover_result(
 
         console.print()
 
-    _print_summary(agents)
+    _print_summary(agents, subnet_stats=subnet_stats)
 
 
 def _print_agent(agent: DiscoveredAgent, verbose: bool) -> None:
@@ -128,7 +147,10 @@ def _print_agent(agent: DiscoveredAgent, verbose: bool) -> None:
     console.print()
 
 
-def _print_summary(agents: list[DiscoveredAgent]) -> None:
+def _print_summary(
+    agents: list[DiscoveredAgent],
+    subnet_stats: SubnetScanStats | None = None,
+) -> None:
     console.rule(style="bright_blue")
     console.print()
 
@@ -170,6 +192,15 @@ def _print_summary(agents: list[DiscoveredAgent]) -> None:
         console.print(
             "  [dim]Run [bold]sentinel scan <file or --pid or --url>[/bold] "
             "for a full posture analysis on any agent above.[/dim]"
+        )
+
+    if subnet_stats:
+        console.print()
+        console.print(
+            f"  [dim]Subnet scan: {subnet_stats.cidr} — "
+            f"{subnet_stats.hosts_scanned:,} hosts · "
+            f"{subnet_stats.open_ports_found} open port{'s' if subnet_stats.open_ports_found != 1 else ''} · "
+            f"{subnet_stats.elapsed_seconds:.1f}s[/dim]"
         )
 
     console.print()
