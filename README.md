@@ -112,7 +112,8 @@ More integrations coming: OpenAI Agents SDK, AWS Bedrock Agents, CrewAI, AutoGen
 
 ### API & Authentication
 - REST API with three key scopes: `admin`, `agent`, `readonly`
-- SHA-256 key hashing — plaintext is never stored
+- HMAC-SHA256 key hashing with server secret — plaintext is never stored
+- Agent-scoped keys are bound to a specific agent — cross-agent event injection is blocked
 - Bootstrap admin key generated automatically on first startup
 
 ### Dashboard
@@ -145,7 +146,16 @@ cd agentsentinel
 cp .env.example .env
 ```
 
-Leave it as-is for now — you'll add the API key in Step 6.
+The template has three required secrets that must be set before the stack will start. Generate them now:
+
+```bash
+# Generate cryptographically random values (run each line separately, copy the output)
+openssl rand -hex 24   # → POSTGRES_PASSWORD
+openssl rand -hex 24   # → REDIS_PASSWORD
+openssl rand -hex 32   # → SECRET_KEY
+```
+
+Edit `.env` and replace the three `<generate: ...>` placeholders with the values above. Leave `AGENTSENTINEL_API_KEY` blank — you'll fill it in at Step 6.
 
 ### Step 3 — Generate a TLS certificate (first time only)
 
@@ -155,40 +165,52 @@ Leave it as-is for now — you'll add the API key in Step 6.
 
 This creates a self-signed cert in `nginx/certs/`. Your browser will show a warning the first time — that's expected for self-signed certs.
 
-### Step 4 — Start the backend
+### Step 4 — Start Postgres and Redis
+
+```bash
+docker compose up -d postgres redis
+```
+
+Wait for both to be healthy (about 10 seconds):
+
+```bash
+docker compose ps
+# Both should show: Up X seconds (healthy)
+```
+
+### Step 5 — Run database migrations
+
+Run this once on a fresh database (or after any upgrade):
+
+```bash
+docker compose run --rm api alembic upgrade head
+```
+
+You should see all four migrations applied:
+```
+INFO  Running upgrade  -> 0001, Initial schema with TimescaleDB hypertable
+INFO  Running upgrade 0001 -> 0002, Add api_keys table
+INFO  Running upgrade 0002 -> 0003, Bind agent-scoped API keys to a specific agent_id
+INFO  Running upgrade 0003 -> 0004, Invalidate all API keys created before the HMAC-SHA256 hash upgrade
+```
+
+### Step 6 — Start the full stack
 
 ```bash
 docker compose up -d
 ```
 
-This starts Postgres, Redis, the FastAPI server, the background worker, and Nginx. Wait about 10 seconds for Postgres to initialise.
+This adds the FastAPI server, the background worker, and Nginx on top of the already-running database services.
 
-### Step 5 — Run database migrations
+### Step 7 — Get your bootstrap API key
 
-```bash
-docker compose exec api alembic upgrade head
-```
-
-You should see:
-```
-INFO  Running upgrade 0001 -> 0002, Add api_keys table...
-```
-
-### Step 6 — Get your API key
-
-Restart the API to trigger the bootstrap key:
+On first startup the API generates an admin key and prints it to **stderr**. Retrieve it immediately:
 
 ```bash
-docker compose restart api
+docker compose logs api 2>&1 | grep -A 4 "BOOTSTRAP ADMIN KEY"
 ```
 
-The bootstrap key is written to **stderr** on first startup. Retrieve it with:
-
-```bash
-docker compose logs api 2>&1 | grep -A 3 "BOOTSTRAP ADMIN KEY"
-```
-
-You'll see a block like:
+You'll see:
 ```
   AGENTSENTINEL BOOTSTRAP ADMIN KEY
   Copy this now — it will not be shown again.
@@ -197,23 +219,20 @@ You'll see a block like:
 ```
 
 > **Production deployments:** Set `BOOTSTRAP_KEY_FILE=/run/secrets/bootstrap-key` and mount
-> a writable secrets volume. The key will be written to that file (mode 0600) instead of
+> a writable secrets volume. The key is written to that file (mode 0600) instead of
 > appearing in container logs.
 
-Copy it and add it to your `.env` file:
+Copy the key and set it in two places:
 
 ```bash
-# In .env:
+# 1. In .env (persistent):
 AGENTSENTINEL_API_KEY=as_adm_<your-key-here>
-```
 
-Also export it in your shell so you can use it in commands:
-
-```bash
+# 2. In your shell (for the curl commands below):
 export AGENTSENTINEL_API_KEY=as_adm_<your-key-here>
 ```
 
-### Step 7 — Verify the backend is working
+### Step 8 — Verify the backend is working
 
 ```bash
 curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
@@ -222,7 +241,7 @@ curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
 
 Expected: `[]` (empty list — no agents yet). If you get a 200 response, the backend is healthy.
 
-### Step 8 — Set up the UI
+### Step 9 — Set up the UI
 
 Create `ui/.env` with your API key so the dashboard can authenticate:
 
@@ -230,7 +249,7 @@ Create `ui/.env` with your API key so the dashboard can authenticate:
 echo "VITE_API_KEY=$AGENTSENTINEL_API_KEY" > ui/.env
 ```
 
-### Step 9 — Start the UI
+### Step 10 — Start the UI
 
 In a **new terminal**:
 
@@ -240,7 +259,7 @@ npm install
 npm run dev
 ```
 
-### Step 10 — Open the dashboard
+### Step 11 — Open the dashboard
 
 Open **http://localhost:5173** in your browser.
 
@@ -248,37 +267,43 @@ You'll see the AgentSentinel dashboard. It's empty for now — the next section 
 
 ---
 
-## Shutdown & Reset
+## Shutdown & Restart
 
-### Graceful shutdown (keeps all data)
+### Stop the stack (keeps all data)
 
-Stops all containers but leaves the Postgres volume intact. Everything picks up exactly where it left off on the next `docker compose up`.
+Stops all containers but leaves the Postgres volume intact. All agents, events, and findings are preserved.
 
 ```bash
-# Stop all containers
+# Stop all backend containers
 docker compose down
 
-# Stop the UI (Ctrl+C in the terminal running npm run dev, or:)
+# Stop the UI dev server
 pkill -f "vite"
 ```
 
-To bring everything back up:
+### Start the stack again
 
 ```bash
+# Start the full backend (no migrations needed — already applied)
 docker compose up -d
+
+# Start the UI (in a separate terminal)
 cd ui && npm run dev
 ```
 
 ---
 
-### Soft reset (wipe agents, keep API key)
+## Reset
 
-Clears all agents, events, findings, and baselines from the database — but keeps your API key so you don't need to reconfigure anything. Use this to start a clean demo run without a full teardown.
+### Soft reset — wipe agents, keep API key
+
+Clears all agents, events, findings, and baselines from the database but keeps your API key intact. Use this to start a clean demo run without a full teardown.
 
 ```bash
-docker compose exec postgres psql -U agentsentinel -d agentsentinel -c "
-TRUNCATE TABLE agent_events, findings, baselines, tool_grants, mcp_connections, agents RESTART IDENTITY CASCADE;
-"
+docker compose exec postgres psql \
+  -U ${POSTGRES_USER:-agentsentinel} \
+  -d ${POSTGRES_DB:-agentsentinel} \
+  -c "TRUNCATE TABLE agent_events, findings, baselines, tool_grants, mcp_connections, agents RESTART IDENTITY CASCADE;"
 ```
 
 Verify it's clean:
@@ -291,30 +316,54 @@ curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
 
 ---
 
-### Hard reset (wipe everything including API key)
+### Hard reset — wipe everything including API key
 
-Destroys the Postgres volume entirely — clean slate, new bootstrap key required.
+Destroys the Postgres volume entirely. You will need a new bootstrap key after this.
 
 ```bash
 # 1. Stop containers and delete the volume
 docker compose down -v
 
-# 2. Restart
+# 2. Start Postgres and Redis
+docker compose up -d postgres redis
+
+# 3. Run migrations on the fresh database
+docker compose run --rm api alembic upgrade head
+
+# 4. Start the full stack
 docker compose up -d
 
-# 3. Run migrations
-docker compose exec api alembic upgrade head
+# 5. Get your new bootstrap API key
+docker compose logs api 2>&1 | grep -A 4 "BOOTSTRAP ADMIN KEY"
 
-# 4. Get your new bootstrap API key
-docker compose logs api | grep "as_adm_"
-
-# 5. Update your .env and ui/.env with the new key
+# 6. Update .env with the new key
 #    AGENTSENTINEL_API_KEY=as_adm_<new-key>
-#    VITE_API_KEY=as_adm_<new-key>
 
-# 6. Restart the UI to pick up the new key
+# 7. Update the UI env and restart
+echo "VITE_API_KEY=as_adm_<new-key>" > ui/.env
 pkill -f "vite" && cd ui && npm run dev
 ```
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `POSTGRES_PASSWORD` | **Yes** | PostgreSQL password — generate with `openssl rand -hex 24` |
+| `REDIS_PASSWORD` | **Yes** | Redis password — generate with `openssl rand -hex 24` |
+| `SECRET_KEY` | **Yes** | Server secret for HMAC key hashing — generate with `openssl rand -hex 32` |
+| `POSTGRES_USER` | No | Postgres username (default: `agentsentinel`) |
+| `POSTGRES_DB` | No | Database name (default: `agentsentinel`) |
+| `DATABASE_URL` | No | Full Postgres connection string (overrides user/pass/db) |
+| `REDIS_URL` | No | Redis connection string including password |
+| `AGENTSENTINEL_API_KEY` | No | Bootstrap admin key — filled in after first startup |
+| `BOOTSTRAP_KEY_FILE` | No | Path to write the one-time bootstrap key (mode 0600). Use a mounted secrets volume in production to prevent the key appearing in container logs. |
+| `SENTINEL_ALLOW_WEAK_SECRET` | No | Set to `true` in dev/test to allow the default `SECRET_KEY`. Never set in production. |
+| `SHOW_DOCS` | No | Set to `true` to enable `/docs`, `/redoc`, `/openapi.json`. Disabled by default — the OpenAPI schema is a reconnaissance resource. |
+| `SLACK_WEBHOOK_URL` | No | Slack webhook URL for CRITICAL finding alerts. Must be HTTPS and target `hooks.slack.com`. |
+| `LOG_LEVEL` | No | Logging level (default: `INFO`) |
+| `CORS_ORIGINS` | No | JSON array of allowed origins (default: localhost dev ports) |
 
 ---
 
@@ -332,11 +381,17 @@ The bootstrap admin key (printed on first startup) has `admin` scope. Use it to 
 
 ### Create an agent-scoped key
 
+Agent-scoped keys must be bound to a specific agent UUID. The key will only be authorised to report events for that agent.
+
 ```bash
-curl -s -X POST https://localhost/api/v1/keys \
+# First, get the agent's UUID
+AGENT_ID=$(curl -s -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
+  http://localhost:9000/api/v1/agents | jq -r '.[0].id')
+
+curl -s -X POST http://localhost:9000/api/v1/keys \
   -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "prod-agent-key", "scope": "agent"}' | jq .
+  -d "{\"name\": \"prod-agent-key\", \"scope\": \"agent\", \"agent_id\": \"$AGENT_ID\"}" | jq .
 ```
 
 The response includes a `key` field — this is the **only time the plaintext key is returned**. Store it securely.
@@ -391,7 +446,7 @@ Trust Score = (Posture Score × 0.45) + (Behavior Score × 0.45) + (Recency × 0
 | 40–59 | **ALERT** | Active risks; investigate soon |
 | 0–39 | **CRITICAL** | Immediate action required |
 
-**Recency bonus (+10)**: applied when the agent was seen in the last 5 minutes, rewarding active agents with fresh data.
+**Recency bonus (+10)**: applied when the agent has ≥5 events in the last hour, rewarding consistently active agents. A single sporadic event is not enough to claim the bonus.
 
 ---
 
@@ -420,12 +475,10 @@ Save the returned `id` as `AGENT_ID`.
 curl -s -X POST https://localhost/api/v1/agents/$AGENT_ID/grants \
   -H "X-API-Key: $AGENTSENTINEL_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "tool_name": "crm_search",
-    "scope": "read",
-    "is_dangerous": false
-  }' | jq .
+  -d '{"tool_name": "crm_search"}' | jq .
 ```
+
+> `scope` and `is_dangerous` are derived server-side from the tool name — do not include them in the request body.
 
 ### 3. Send a tool-call event
 
@@ -583,7 +636,7 @@ Wait until you see:
 [shim] Registered agent   : <uuid> (my-mcp-agent)
 [shim] upstream ready — proxying 14 tools: ['read_file', 'write_file', 'list_directory', ...]
 [shim] Added 14 tool grants
-[shim] Shim listening on  : http://0.0.0.0:8002/sse
+[shim] Shim listening on  : http://127.0.0.1:8002/sse
 [shim] ← Point your agent here instead of the real MCP server
 ```
 

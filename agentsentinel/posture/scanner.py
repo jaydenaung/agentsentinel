@@ -17,7 +17,14 @@ log = structlog.get_logger(__name__)
 
 async def run_posture_scan(agent_id: uuid.UUID, db: AsyncSession) -> int:
     """Run all posture rules for an agent, persist new findings, return posture score."""
-    agent = await db.get(Agent, agent_id)
+    try:
+        result = await db.execute(
+            select(Agent).where(Agent.id == agent_id).with_for_update()
+        )
+        agent = result.scalar_one_or_none()
+    except Exception:
+        agent = await db.get(Agent, agent_id)
+
     if agent is None:
         log.warning("posture_scan.agent_not_found", agent_id=str(agent_id))
         return 0

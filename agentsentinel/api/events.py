@@ -32,14 +32,14 @@ async def list_events(
 ) -> list[EventListItem]:
     """Return the most recent tool-call events, newest first.
 
-    readonly keys must supply agent_id — omitting it would expose events from
-    every monitored agent to any holder of a readonly key (cross-tenant leakage).
-    admin keys may omit agent_id to retrieve the global event stream.
+    Non-admin keys must supply agent_id — omitting it would expose events from
+    every monitored agent (cross-tenant data leakage). Admin keys may omit
+    agent_id to retrieve the global event stream.
     """
-    if key.scope == "readonly" and agent_id is None:
+    if key.scope in ("readonly", "agent") and agent_id is None:
         raise HTTPException(
             status_code=400,
-            detail="agent_id query parameter is required for readonly keys",
+            detail="agent_id query parameter is required for non-admin keys",
         )
 
     stmt = (
@@ -67,14 +67,30 @@ async def list_events(
     ]
 
 
-@router.post("", response_model=EventResponse, status_code=201,
-             dependencies=[Depends(require_agent)])
+@router.post("", response_model=EventResponse, status_code=201)
 async def ingest(
     body: EventIngest,
+    key: Annotated[ApiKey, Depends(require_agent)],
     db: Annotated[AsyncSession, Depends(get_db)],
     redis: Annotated[Redis, Depends(get_redis)],
 ) -> EventResponse:
-    """Ingest a tool-call event, score it for anomalies, and push to Redis Stream."""
+    """Ingest a tool-call event, score it for anomalies, and push to Redis Stream.
+
+    Agent-scoped keys with a bound agent_id may only report events for that agent.
+    """
+    if key.scope == "agent" and key.agent_id is not None:
+        if body.agent_id != key.agent_id:
+            log.warning(
+                "event.unauthorized_agent_id",
+                key_id=str(key.id),
+                key_agent_id=str(key.agent_id),
+                body_agent_id=str(body.agent_id),
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="API key is not authorised to report events for this agent_id",
+            )
+
     agent = await db.get(Agent, body.agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -93,11 +109,7 @@ async def ingest(
     anomaly_score = await score_event(event, db)
     event.anomaly_score = anomaly_score
 
-    log.info(
-        "event.scored",
-        event_id=str(event.id),
-        anomaly_score=anomaly_score,
-    )
+    log.info("event.scored", event_id=str(event.id), anomaly_score=anomaly_score)
 
     return EventResponse(
         event_id=event.id,

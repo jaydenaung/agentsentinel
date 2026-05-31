@@ -1,5 +1,11 @@
 """Shared pytest fixtures for AgentSentinel tests."""
 
+import os
+
+# Must be set before importing agentsentinel modules so that Settings() does not raise
+# when SECRET_KEY is the insecure default (acceptable in the test environment only).
+os.environ.setdefault("SENTINEL_ALLOW_WEAK_SECRET", "true")
+
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
@@ -70,6 +76,7 @@ async def admin_api_key(db: AsyncSession) -> str:
         key_prefix=key_prefix(raw),
         key_hash=hash_key(raw),
         scope="admin",
+        agent_id=None,
         is_active=True,
     )
     db.add(key)

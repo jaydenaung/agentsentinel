@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     @classmethod
     def validate_slack_url(cls, v: str | None) -> str | None:
         """Prevent SSRF — only allow HTTPS calls to hooks.slack.com."""
-        if v is None:
-            return v
+        if not v:  # treat empty string same as None — webhook not configured
+            return None
         parsed = urlparse(v)
         if parsed.scheme != "https":
             raise ValueError("SLACK_WEBHOOK_URL must use HTTPS")

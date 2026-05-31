@@ -167,7 +167,12 @@ def rule_insecure_mcp_connection(
     connections: list[McpConnection],
 ) -> Finding | None:
     """HIGH: MCP connection using plain HTTP (not HTTPS) — credentials and data sent in the clear."""
-    insecure = [c for c in connections if c.server_url.startswith("http://")]
+    _LOOPBACK = ("http://localhost", "http://127.0.0.1", "http://[::1]")
+    insecure = [
+        c for c in connections
+        if c.server_url.startswith("http://")
+        and not any(c.server_url.startswith(lb) for lb in _LOOPBACK)
+    ]
     if insecure:
         endpoints = ", ".join(c.server_url for c in insecure)
         return _make_finding(

@@ -11,6 +11,11 @@ from agentsentinel.models.finding import Finding
 log = structlog.get_logger(__name__)
 
 
+def _escape_mrkdwn(text: str) -> str:
+    """Escape Slack mrkdwn special characters to prevent message injection."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _is_safe_webhook_url(url: str) -> bool:
     """Defense-in-depth check: ensure the URL still targets hooks.slack.com over HTTPS.
 
@@ -38,8 +43,12 @@ async def send_critical_alert(finding: Finding, agent_name: str) -> bool:
         log.error("slack.webhook_url_blocked", reason="URL did not pass SSRF safety check")
         return False
 
+    safe_agent_name = _escape_mrkdwn(agent_name)
+    safe_rule_id = _escape_mrkdwn(finding.rule_id)
+    safe_message = _escape_mrkdwn(finding.message)
+
     payload = {
-        "text": f":rotating_light: *CRITICAL Finding — {agent_name}*",
+        "text": f":rotating_light: *CRITICAL Finding — {safe_agent_name}*",
         "blocks": [
             {
                 "type": "section",
@@ -47,9 +56,9 @@ async def send_critical_alert(finding: Finding, agent_name: str) -> bool:
                     "type": "mrkdwn",
                     "text": (
                         f":rotating_light: *CRITICAL Security Finding*\n"
-                        f"*Agent:* {agent_name}\n"
-                        f"*Rule:* `{finding.rule_id}`\n"
-                        f"*Message:* {finding.message}"
+                        f"*Agent:* {safe_agent_name}\n"
+                        f"*Rule:* `{safe_rule_id}`\n"
+                        f"*Message:* {safe_message}"
                     ),
                 },
             }

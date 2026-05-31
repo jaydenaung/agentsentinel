@@ -125,15 +125,18 @@ class SentinelCallbackHandler(BaseCallbackHandler):
             return fallback
 
     def _add_grant(self, tool_name: str) -> None:
-        """Auto-register a tool grant on first encounter."""
+        """Auto-register a tool grant on first encounter.
+
+        Only tool_name is sent — scope and is_dangerous are derived server-side
+        to prevent client-side classification from influencing posture rules.
+        """
         if tool_name in self._registered_tools:
             return
-        scope, is_dangerous = _classify_tool(tool_name)
         try:
             with httpx.Client(timeout=5.0) as client:
                 r = client.post(
                     f"{self.base_url}/api/v1/agents/{self.agent_id}/grants",
-                    json={"tool_name": tool_name, "scope": scope, "is_dangerous": is_dangerous},
+                    json={"tool_name": tool_name},
                     headers=self._headers,
                 )
                 r.raise_for_status()
