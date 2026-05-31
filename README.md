@@ -15,7 +15,7 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
   ─────────────────────────────────────────────────────────────
   ┌──────────────────┐  ┌─────────────────┐  ┌─────────────┐
   │  demo/agent.py   │  │  demo/mcp_shim  │  │  React UI   │
-  │  (Claude loop +  │  │  (MCP proxy,    │  │  port 5173  │
+  │  (Claude loop +  │  │  (MCP proxy,    │  │  port 5174  │
   │   SentinelMiddle │  │   zero-touch)   │  │  (dev)      │
   │   ware)          │  │                 │  │             │
   └────────┬─────────┘  └────────┬────────┘  └──────┬──────┘
@@ -122,6 +122,54 @@ More integrations coming: OpenAI Agents SDK, AWS Bedrock Agents, CrewAI, AutoGen
 - Live event feed with anomaly scores and per-agent filter
 - Test event sender for manual demos without a running agent
 - Agent and grant registration forms
+
+---
+
+## Quick Reference — Start & Stop Everything
+
+### Start
+
+```bash
+# 1. Backend (all services)
+docker compose up -d
+
+# 2. Dashboard UI  (new terminal)
+cd ui && npm run dev
+# → http://localhost:5174
+
+# 3. Demo agent — Claude agentic loop (new terminal, needs ANTHROPIC_API_KEY)
+export ANTHROPIC_API_KEY=sk-ant-...
+export AGENTSENTINEL_API_KEY=as_adm_...
+export SENTINEL_URL=http://localhost:9000
+python demo/agent.py
+
+# 4. MCP shim — zero-touch proxy (new terminal, keeps running)
+export AGENTSENTINEL_API_KEY=as_adm_...
+PYTHONUNBUFFERED=1 python3.11 demo/mcp_shim.py \
+    --upstream-cmd "npx -y @modelcontextprotocol/server-filesystem /tmp" \
+    --agent-name "my-mcp-agent" \
+    --port 8002
+```
+
+### Stop
+
+```bash
+# Stop the backend (keeps all data)
+docker compose down
+
+# Stop the UI dev server
+pkill -f "vite"
+
+# Stop the MCP shim or demo agent
+# → Press Ctrl+C in the terminal where it is running
+```
+
+### Check what's running
+
+```bash
+docker compose ps          # backend service status
+curl http://localhost:9000/health   # API health
+```
 
 ---
 
@@ -261,7 +309,7 @@ npm run dev
 
 ### Step 11 — Open the dashboard
 
-Open **http://localhost:5173** in your browser.
+Open **http://localhost:5174** in your browser.
 
 You'll see the AgentSentinel dashboard. It's empty for now — the next section shows you how to get agents appearing with live trust scores.
 
@@ -584,9 +632,13 @@ The dangerous grants (`send_email`, `write_file`) immediately trigger posture fi
 
 ### Step 4 — Watch it in the dashboard
 
-Open **http://localhost:5173** — the agent appears immediately with its trust score, posture findings, and per-tool anomaly history.
+Open **http://localhost:5174** — the agent appears immediately with its trust score, posture findings, and per-tool anomaly history.
 
 > Run the agent 2–3 times to watch the behavior engine build a baseline. Routine tool calls drop toward `anomaly=0.000` once the engine recognises the pattern.
+
+### Stop the demo agent
+
+The demo agent runs 6 prompts and **exits automatically**. No manual stop needed. To interrupt it mid-run, press `Ctrl+C`.
 
 ---
 
@@ -673,9 +725,13 @@ Back in Terminal 1 you'll see the anomaly score for each intercepted call:
 
 ### Step 5 — Watch it in the dashboard
 
-Open **http://localhost:5173** — your MCP agent appears with its trust score, write-scoped tool grants, and live anomaly scores.
+Open **http://localhost:5174** — your MCP agent appears with its trust score, write-scoped tool grants, and live anomaly scores.
 
 > Scores start high (~0.9) for a brand-new agent with no baseline. Run the test client a few more times and watch routine calls drop toward `0.0`.
+
+### Stop the MCP shim
+
+The shim runs continuously until you stop it. Press `Ctrl+C` in Terminal 1. The agent and its history remain in AgentSentinel — restart the shim with `--agent-id <uuid>` to continue from where you left off.
 
 ### Reuse an existing agent
 
