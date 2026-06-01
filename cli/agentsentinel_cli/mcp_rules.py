@@ -40,7 +40,12 @@ _EXTERNAL_WRITE_KW = frozenset({
 # ── Rules ─────────────────────────────────────────────────────────────────────
 
 def _rule_no_auth(ctx: McpContext) -> McpFinding | None:
-    """CRITICAL: server accepted enumerate without credentials. (OWASP LLM06)"""
+    """CRITICAL: HTTP server requires no credentials to enumerate tools. (OWASP LLM06)
+
+    Not applicable to stdio transport — stdio processes are isolated by the OS.
+    """
+    if ctx.server.transport == "stdio":
+        return None
     if not ctx.auth_required and ctx.server.tools:
         return McpFinding(
             severity="CRITICAL",
@@ -55,7 +60,9 @@ def _rule_no_auth(ctx: McpContext) -> McpFinding | None:
 
 
 def _rule_unauth_dangerous(ctx: McpContext) -> McpFinding | None:
-    """CRITICAL: dangerous tools callable without auth. (OWASP LLM06)"""
+    """CRITICAL: dangerous tools callable without auth on HTTP server. (OWASP LLM06)"""
+    if ctx.server.transport == "stdio":
+        return None
     if ctx.auth_required:
         return None
     dangerous = [t.name for t in ctx.server.tools if t.is_dangerous]
