@@ -286,6 +286,17 @@ def scan_file(path: Path) -> AgentInfo | None:
     )
 
 
+def classify_tool(name: str, description: str = "") -> tuple[str, bool, str]:
+    """Classify a tool by name and description into (scope, is_dangerous, category).
+
+    Used by both the static file scanner and the MCP scanner.
+    """
+    combined = f"{name} {description}".strip()
+    scope, is_dangerous = _classify(combined)
+    category = _categorize(combined)
+    return scope, is_dangerous, category
+
+
 def scan_path(target: Path) -> list[AgentInfo]:
     """Scan a file or directory, returning one AgentInfo per file that contains tools."""
     if target.is_file():

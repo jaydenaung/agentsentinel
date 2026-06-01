@@ -193,6 +193,113 @@ def discover(
         sys.exit(1)
 
 
+# ── sentinel mcp ──────────────────────────────────────────────────────────────
+
+@main.group(name="mcp")
+def mcp_group() -> None:
+    """MCP server security commands.
+
+    \b
+    Commands:
+      scan   Enumerate an MCP server's tools and audit for security issues
+    """
+
+
+@mcp_group.command("scan")
+@click.argument("target", default=None, required=False, metavar="URL")
+@click.option("--stdio", "stdio_cmd", default=None, metavar="CMD",
+              help="Audit a stdio-transport server. Provide the launch command, e.g. 'python server.py'.")
+@click.option("--auth-header", "auth_header", default=None, metavar="HEADER",
+              help="HTTP header to include, e.g. 'Authorization: Bearer token123'.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text",
+              help="Output format.")
+@click.option("--timeout", default=10.0, show_default=True, metavar="SECONDS",
+              help="Connection timeout in seconds.")
+@click.option("--fail-on", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"]), default=None,
+              help="Exit with code 1 if findings at or above this severity exist.")
+def mcp_scan(
+    target: str | None,
+    stdio_cmd: str | None,
+    auth_header: str | None,
+    fmt: str,
+    timeout: float,
+    fail_on: str | None,
+) -> None:
+    """Enumerate an MCP server's tools and audit for security issues.
+
+    Connects to the server, lists all exposed tools, and checks for
+    authentication gaps, exfiltration paths, code execution exposure,
+    and input validation weaknesses.
+
+    \b
+    Examples:
+        sentinel mcp scan http://localhost:3000
+        sentinel mcp scan http://localhost:3000 --auth-header "Authorization: Bearer token"
+        sentinel mcp scan --stdio "python my_mcp_server.py"
+        sentinel mcp scan http://localhost:3000 --format json
+        sentinel mcp scan http://localhost:3000 --fail-on CRITICAL
+    """
+    from agentsentinel_cli.mcp_client import scan_http, scan_stdio, McpError, McpAuthRequired
+    from agentsentinel_cli.mcp_rules import McpContext, run_mcp_rules, mcp_posture_score
+    from agentsentinel_cli.mcp_report import print_mcp_result, as_mcp_json
+
+    if not target and not stdio_cmd:
+        console.print("[red]Error:[/red] provide a URL target or --stdio CMD.")
+        console.print("  Example: [dim]sentinel mcp scan http://localhost:3000[/dim]")
+        console.print("  Example: [dim]sentinel mcp scan --stdio 'python server.py'[/dim]")
+        sys.exit(1)
+    if target and stdio_cmd:
+        console.print("[red]Error:[/red] --stdio and a URL target are mutually exclusive.")
+        sys.exit(1)
+
+    display_target = stdio_cmd if stdio_cmd else target
+
+    extra_headers: dict[str, str] = {}
+    if auth_header:
+        if ":" not in auth_header:
+            console.print("[red]Error:[/red] --auth-header must be in 'Header-Name: value' format.")
+            sys.exit(1)
+        key, _, val = auth_header.partition(":")
+        extra_headers[key.strip()] = val.strip()
+
+    auth_required = bool(auth_header)
+
+    try:
+        if stdio_cmd:
+            server = scan_stdio(stdio_cmd, timeout=timeout)
+            auth_required = False  # stdio has no network auth concept
+        else:
+            server = scan_http(target, extra_headers=extra_headers or None, timeout=timeout)
+    except McpAuthRequired as exc:
+        console.print(f"\n[bold yellow]Authentication required[/bold yellow] (HTTP {exc.status_code})")
+        console.print(
+            "  Provide credentials with: "
+            "[bold]--auth-header 'Authorization: Bearer <token>'[/bold]"
+        )
+        sys.exit(1)
+    except McpError as exc:
+        console.print(f"\n[red]MCP connection failed:[/red] {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        console.print(f"\n[red]Unexpected error:[/red] {exc}")
+        sys.exit(1)
+
+    ctx = McpContext(server=server, auth_required=auth_required)
+    findings = run_mcp_rules(ctx)
+    score = mcp_posture_score(findings)
+
+    if fmt == "json":
+        click.echo(as_mcp_json(ctx, findings, score, display_target))
+    else:
+        print_mcp_result(ctx, findings, score, display_target)
+
+    if fail_on:
+        _severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+        threshold = _severity_rank.get(fail_on, 0)
+        if any(_severity_rank.get(f.severity, 0) >= threshold for f in findings):
+            sys.exit(1)
+
+
 def _parse_ports(ports_str: str) -> list[int]:
     """Parse '8000-9001' or '8000,8080,9000' into a list of ints."""
     ports: list[int] = []

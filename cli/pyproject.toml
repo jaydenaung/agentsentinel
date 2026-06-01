@@ -35,6 +35,10 @@ discover = [
 connect = [
     "httpx>=0.24.0",
 ]
+# sentinel mcp scan (MCP server auditing)
+mcp = [
+    "httpx>=0.24.0",    # HTTP/streamable-HTTP transport
+]
 # Install everything
 all = [
     "psutil>=5.9.0",
