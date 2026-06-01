@@ -7,6 +7,7 @@ import click
 
 from agentsentinel_cli.scanner import scan_path
 from agentsentinel_cli.rules import run_rules, posture_score
+from rich.panel import Panel
 from agentsentinel_cli.report import print_scan_result, as_json, console
 
 
@@ -297,6 +298,217 @@ def mcp_scan(
         _severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
         threshold = _severity_rank.get(fail_on, 0)
         if any(_severity_rank.get(f.severity, 0) >= threshold for f in findings):
+            sys.exit(1)
+
+
+# ── sentinel probe ────────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("target_url")
+@click.option("--input-field",  "input_field",  default=None, metavar="FIELD",
+              help="JSON field name for the message (auto-detected if omitted).")
+@click.option("--output-field", "output_field", default=None, metavar="FIELD",
+              help="JSON field name for the response (auto-detected if omitted).")
+@click.option("--auth-header",  "auth_header",  default=None, metavar="HEADER",
+              help="HTTP auth header, e.g. 'Authorization: Bearer token'.")
+@click.option("--attacks", "attack_cats", default=None, metavar="CATS",
+              help="Comma-separated categories: injection,jailbreak,extraction,encoding,context. Default: all.")
+@click.option("--timeout", default=15.0, show_default=True, metavar="SECONDS",
+              help="Per-probe timeout in seconds.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.option("--fail-on", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+              default=None, help="Exit 1 if any finding at or above this severity.")
+def probe(
+    target_url: str,
+    input_field: str | None,
+    output_field: str | None,
+    auth_header: str | None,
+    attack_cats: str | None,
+    timeout: float,
+    fmt: str,
+    fail_on: str | None,
+) -> None:
+    """Run a static attack battery against a live agent endpoint.
+
+    Sends 50 adversarial payloads across 5 categories and detects success via
+    response pattern matching. No API key required.
+
+    \b
+    Examples:
+        sentinel probe http://my-agent.com/chat
+        sentinel probe http://my-agent.com/chat --attacks injection,jailbreak
+        sentinel probe http://my-agent.com/chat --input-field message --output-field response
+        sentinel probe http://my-agent.com/chat --auth-header "Authorization: Bearer token"
+        sentinel probe http://my-agent.com/chat --format json --fail-on HIGH
+    """
+    from agentsentinel_cli.target import TargetConfig, TargetError
+    from agentsentinel_cli.probe import run_probe
+    from agentsentinel_cli.probe_report import print_probe_result, as_probe_json
+
+    categories = [c.strip() for c in attack_cats.split(",")] if attack_cats else None
+
+    config = TargetConfig(
+        url=target_url,
+        input_field=input_field,
+        output_field=output_field,
+        auth_header=auth_header,
+        timeout=timeout,
+    )
+
+    total_attacks = len(__import__("agentsentinel_cli.attacks", fromlist=["get_attacks"]).get_attacks(categories))
+    _counter: list[int] = [0]
+
+    def _progress(current: int, total: int, attack_id: str, name: str) -> None:
+        _counter[0] = current
+        if fmt == "text":
+            console.print(
+                f"  [dim][{current:>2}/{total}][/dim] "
+                f"[dim cyan]{attack_id}[/dim cyan] {name[:50]}",
+                end="\r",
+            )
+
+    if fmt == "text":
+        console.print()
+        console.print(
+            f"  Running [bold white]{total_attacks}[/bold white] probes against "
+            f"[bold white]{target_url}[/bold white] …\n"
+        )
+
+    try:
+        report = run_probe(config, categories=categories, progress_cb=_progress)
+    except TargetError as exc:
+        console.print(f"\n[red]Target error:[/red] {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        console.print(f"\n[red]Unexpected error:[/red] {exc}")
+        sys.exit(1)
+
+    if fmt == "text":
+        console.print()  # clear progress line
+        print_probe_result(report)
+    else:
+        click.echo(as_probe_json(report))
+
+    if fail_on:
+        _rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+        threshold = _rank.get(fail_on, 0)
+        if any(_rank.get(r.severity, 0) >= threshold for r in report.findings):
+            sys.exit(1)
+
+
+# ── sentinel ai-probe ─────────────────────────────────────────────────────────
+
+@main.command(name="ai-probe")
+@click.argument("target_url")
+@click.option("--input-field",  "input_field",  default=None, metavar="FIELD",
+              help="JSON field name for the message (auto-detected if omitted).")
+@click.option("--output-field", "output_field", default=None, metavar="FIELD",
+              help="JSON field name for the response (auto-detected if omitted).")
+@click.option("--auth-header",  "auth_header",  default=None, metavar="HEADER",
+              help="HTTP auth header, e.g. 'Authorization: Bearer token'.")
+@click.option("--context", "ctx", default="", metavar="TEXT",
+              help="Optional context about the agent, e.g. 'customer service bot for a bank'.")
+@click.option("--max-probes", default=20, show_default=True,
+              help="Maximum number of probes Claude can send.")
+@click.option("--model", default="claude-opus-4-8", show_default=True,
+              help="Claude model to use as the probe agent.")
+@click.option("--timeout", default=15.0, show_default=True, metavar="SECONDS",
+              help="Per-probe timeout in seconds.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
+@click.option("--fail-on", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+              default=None, help="Exit 1 if any finding at or above this severity.")
+def ai_probe(
+    target_url: str,
+    input_field: str | None,
+    output_field: str | None,
+    auth_header: str | None,
+    ctx: str,
+    max_probes: int,
+    model: str,
+    timeout: float,
+    fmt: str,
+    fail_on: str | None,
+) -> None:
+    """Run Claude as an autonomous red-team agent against a live endpoint.
+
+    Claude decides what to test, interprets responses intelligently, escalates
+    on partial success, and records findings with evidence. Requires ANTHROPIC_API_KEY.
+
+    \b
+    Examples:
+        sentinel ai-probe http://my-agent.com/chat
+        sentinel ai-probe http://my-agent.com/chat --context "customer service bot for a bank"
+        sentinel ai-probe http://my-agent.com/chat --max-probes 30
+        sentinel ai-probe http://my-agent.com/chat --format json --fail-on CRITICAL
+    """
+    import os
+    from agentsentinel_cli.target import TargetConfig, TargetError
+    from agentsentinel_cli.ai_probe import run_ai_probe, DEFAULT_MODEL
+    from agentsentinel_cli.probe_report import print_ai_probe_result, as_ai_probe_json
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        console.print("[red]Error:[/red] ANTHROPIC_API_KEY environment variable is not set.")
+        console.print("  Export it with: [bold]export ANTHROPIC_API_KEY=sk-ant-...[/bold]")
+        sys.exit(1)
+
+    config = TargetConfig(
+        url=target_url,
+        input_field=input_field,
+        output_field=output_field,
+        auth_header=auth_header,
+        timeout=timeout,
+    )
+
+    if fmt == "text":
+        console.print()
+        console.print(Panel.fit(
+            f"[bold white]AgentSentinel AI Probe[/bold white]  [dim](Claude {model})[/dim]\n"
+            f"[dim]Target: {target_url}[/dim]",
+            border_style="bright_blue",
+            padding=(0, 2),
+        ))
+        console.print(
+            f"\n  Probe agent initialised. Budget: [bold white]{max_probes}[/bold white] probes.\n"
+        )
+
+    def _progress(probe_num: int, total: int, category: str, rationale: str) -> None:
+        if fmt == "text":
+            console.print(
+                f"  [dim][{probe_num:>2}/{total}][/dim] "
+                f"[dim cyan]{category:<12}[/dim cyan] "
+                f"[dim]{rationale[:60]}[/dim]"
+            )
+
+    try:
+        report = run_ai_probe(
+            config,
+            api_key=api_key,
+            max_probes=max_probes,
+            context=ctx,
+            model=model,
+            progress_cb=_progress,
+        )
+    except ImportError as exc:
+        console.print(f"\n[red]Missing dependency:[/red] {exc}")
+        sys.exit(1)
+    except TargetError as exc:
+        console.print(f"\n[red]Target error:[/red] {exc}")
+        sys.exit(1)
+    except Exception as exc:
+        console.print(f"\n[red]Unexpected error:[/red] {exc}")
+        sys.exit(1)
+
+    if fmt == "text":
+        console.print()
+        print_ai_probe_result(report)
+    else:
+        click.echo(as_ai_probe_json(report))
+
+    if fail_on:
+        _rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+        threshold = _rank.get(fail_on, 0)
+        if any(_rank.get(f.severity, 0) >= threshold for f in report.findings):
             sys.exit(1)
 
 
