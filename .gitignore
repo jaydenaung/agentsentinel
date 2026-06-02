@@ -17,3 +17,6 @@ nginx/certs/*.key
 nginx/certs/*.pem
 prompt/
 tmp/
+memory/
+.DS_Store
+~$*
