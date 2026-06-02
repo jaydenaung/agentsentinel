@@ -74,11 +74,12 @@ def _print_finding(f: SecretFinding) -> None:
     color = _SEV_COLOR.get(f.severity, "white")
     jtag = _JURISDICTION_TAG.get(f.jurisdiction, "")
     val_mark = " [dim green]✓validated[/dim green]" if f.validated else ""
+    location = str(f.file) if f.line == 0 else f"{f.file}:{f.line}"
 
     console.print(
         f"  [{color}]● {f.severity:<8}[/{color}]  "
         f"[bold white]{f.rule_id}[/bold white]{jtag}{val_mark}"
-        f"  [dim]{f.file}:{f.line}[/dim]"
+        f"  [dim]{location}[/dim]"
     )
     if f.match_preview:
         console.print(f"  [dim]{'':11}{f.match_preview}[/dim]")

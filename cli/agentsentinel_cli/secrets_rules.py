@@ -37,6 +37,7 @@ class SecretFinding:
 
 _ALL: frozenset[str] = frozenset({"memory", "config", "source", "other"})
 _MEM_CFG: frozenset[str] = frozenset({"memory", "config"})
+_MEM_CFG_OTHER: frozenset[str] = frozenset({"memory", "config", "other"})  # includes logs, CSVs
 _MEM_ONLY: frozenset[str] = frozenset({"memory"})
 _CFG_ONLY: frozenset[str] = frozenset({"config"})
 
@@ -171,7 +172,7 @@ _PII_RULES: list[_PiiRule] = [
              # Negative lookbehind: must not be preceded by alphanumeric/URL chars
              # This prevents matching mid-word substrings like password@host in DB URLs
              re.compile(r"(?<![a-zA-Z0-9._%+\-/:])[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"),
-             _MEM_CFG,
+             _MEM_CFG_OTHER,  # also covers log files and CSV exports
              "Remove personal email addresses from agent memory. "
              "Audit which tool call produced this."),
     _PiiRule("CREDIT_CARD", "HIGH", "global",
@@ -179,14 +180,14 @@ _PII_RULES: list[_PiiRule] = [
                  r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}"
                  r"|3[47][0-9]{13}|6(?:011|5[0-9]{2})[0-9]{12})\b"
              ),
-             _MEM_CFG,
-             "Credit card numbers must not appear in agent memory. "
+             _MEM_CFG_OTHER,  # also covers data export files
+             "Credit card numbers must not appear in agent files. "
              "Purge and audit tool call history.",
              validator=lambda m: _luhn_check(re.sub(r"\D", "", m))),
     # USA
     _PiiRule("US_SSN", "HIGH", "USA",
              re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-             _MEM_CFG,
+             _MEM_CFG_OTHER,  # also covers log files and data exports
              "US SSNs are protected under US privacy law. "
              "Purge from memory files and audit data flows.",
              validator=_valid_ssn),

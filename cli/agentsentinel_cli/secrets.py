@@ -55,7 +55,7 @@ _MEMORY_NAME_KW: frozenset[str] = frozenset({
     "memory", "conversation", "session", "history", "cache", "agent_log", "chat_log",
 })
 
-_MEMORY_EXTS: frozenset[str] = frozenset({".md", ".txt", ".json", ""})
+_MEMORY_EXTS: frozenset[str] = frozenset({".md", ".txt", ".json", ".log", ".csv", ".tsv", ""})
 _CONFIG_EXTS: frozenset[str] = frozenset({".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"})
 _CONFIG_NAMES: frozenset[str] = frozenset({
     ".env", "config.json", "settings.json", "secrets.json",
@@ -93,24 +93,43 @@ _PRUNE_DIRS: frozenset[str] = frozenset({
 
 _MAX_FILE_BYTES = 1_000_000  # skip files larger than 1 MB
 
+# Binary file types that cannot be text-scanned but warrant a warning when
+# found inside agent memory directories (serialized memory, SQLite stores, etc.)
+_BINARY_MEMORY_EXTS: frozenset[str] = frozenset({
+    ".pkl", ".joblib",          # Python serialized objects (LangChain memory, sklearn)
+    ".pt", ".pth",              # PyTorch tensors / model checkpoints
+    ".db", ".sqlite", ".sqlite3",  # SQLite databases (common agent memory backend)
+})
+
 
 def _iter_files(root: Path) -> Iterator[Path]:
     """Walk root using os.walk with directory pruning.
 
     Prunes entire subtrees (node_modules, .venv, .git, etc.) before any file
-    enumeration — dramatically faster than rglob("*") + post-filter for typical
-    agent project layouts.
+    enumeration. Also yields binary memory files from known memory directories
+    so they receive a BINARY_MEMORY_STORE warning finding.
     """
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        # Modify dirnames in-place: os.walk will not descend into pruned dirs.
         dirnames[:] = [
             d for d in dirnames
             if d not in _PRUNE_DIRS
             and not d.endswith(".egg-info")
         ]
+        # Check once per directory whether we're inside a known memory path
+        dir_parts = set(Path(dirpath).parts)
+        in_memory_dir = bool(dir_parts & _MEMORY_DIRS)
+
         for filename in filenames:
             path = Path(dirpath) / filename
-            if path.suffix.lower() not in _SKIP_EXTS:
+            ext = path.suffix.lower()
+
+            # Yield binary memory files for a warning — skip the size check
+            # since we won't read their content anyway
+            if ext in _BINARY_MEMORY_EXTS and in_memory_dir:
+                yield path
+                continue
+
+            if ext not in _SKIP_EXTS:
                 try:
                     if path.stat().st_size <= _MAX_FILE_BYTES:
                         yield path
@@ -181,6 +200,25 @@ def _scan_file(
         return []
     if scope == "config" and file_type not in {"memory", "config"}:
         return []
+
+    # Binary memory stores can't be text-scanned — emit a single advisory finding
+    if path.suffix.lower() in _BINARY_MEMORY_EXTS:
+        return [SecretFinding(
+            rule_id="BINARY_MEMORY_STORE",
+            severity="MEDIUM",
+            category="memory_contamination",
+            jurisdiction="global",
+            file=path,
+            line=0,
+            match_preview=path.name,
+            context_line=f"Binary {path.suffix} file in agent memory directory — cannot be text-scanned",
+            recommendation=(
+                f"Serialized memory store found ({path.suffix}). May contain customer PII or "
+                "credentials captured from tool calls. "
+                "Inspect manually or delete if the session data is no longer needed."
+            ),
+            validated=False,
+        )]
 
     lines = _read_lines(path)
     if lines is None:
