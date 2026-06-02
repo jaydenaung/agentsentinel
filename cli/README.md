@@ -6,6 +6,7 @@ Security scanner, red-team tool, and MCP auditor for AI agents. No server, no Do
 pipx install "agentsentinel-cli[all]"
 sentinel inspect my_agent.py                  # what is this agent? plain English
 sentinel scan my_agent.py                     # posture audit
+sentinel secrets .                            # scan for leaked keys, PII, Singapore NRIC
 sentinel probe http://localhost:3000          # 42-payload attack battery
 sentinel ai-probe http://localhost:3000       # Claude-driven autonomous red-team
 sentinel mcp scan http://localhost:3001       # MCP server security audit
@@ -39,6 +40,7 @@ pip install "agentsentinel-cli[all]"           # everything
 | **Posture** — what can it do? | `sentinel scan` | Static AST analysis, 12 rules, CI gate |
 | **Posture** — what's running? | `sentinel discover` | Find unknown agents in processes, containers, subnets |
 | **Posture** — MCP exposure? | `sentinel mcp scan` | Enumerate and audit any MCP server |
+| **Secrets & PII** | `sentinel secrets` | Credentials, global PII, Singapore NRIC/FIN, memory contamination |
 | **Vulnerability** — static | `sentinel probe` | 42-payload attack battery, no API key required |
 | **Vulnerability** — AI-driven | `sentinel ai-probe` | Claude Opus as autonomous red-team agent |
 
@@ -237,6 +239,103 @@ that trigger every finding.
 
 ---
 
+### `sentinel secrets` — scan for exposed secrets, API keys, and PII
+
+AI agents process sensitive data — customer records, credentials, system prompts — and
+many frameworks persist this to local memory files (`.md`, `.json`, conversation logs).
+`sentinel secrets` finds what leaked where, before an attacker does.
+
+Three detection layers:
+- **Credentials** — 13 patterns: Anthropic, OpenAI, AWS, GitHub, Stripe, Google, HuggingFace, Slack, database URLs, JWT tokens, private key blocks
+- **PII (global)** — email addresses, credit cards (Luhn-validated), US SSNs
+- **PII (Singapore)** — NRIC/FIN with weighted mod-11 checksum validation, passport, mobile (+65 8xxx/9xxx), landline, UEN, postal codes
+- **Memory contamination** — PII clusters from tool call results, system prompt leakage in memory files
+
+```bash
+# Scan current directory (all file types)
+sentinel secrets .
+
+# Scan Claude Code agent memory
+sentinel secrets ~/.claude/projects/
+
+# Memory files only (conversation logs, agent memory dirs)
+sentinel secrets . --scope memory
+
+# Config and env files only
+sentinel secrets . --scope config
+
+# Show only HIGH and CRITICAL
+sentinel secrets . --severity HIGH
+
+# Machine-readable output for SIEM
+sentinel secrets . --format json
+
+# CI gate — fail build if HIGH+ findings exist
+sentinel secrets . --fail-on HIGH
+
+# Show full matched values (no masking)
+sentinel secrets . --no-redact
+```
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--scope all\|memory\|config` | `all` | Restrict scan to memory files, config files, or both |
+| `--severity` | `MEDIUM` | Minimum severity to display |
+| `--format text\|json` | `text` | Output format |
+| `--fail-on` | — | Exit code 1 if findings at this severity or above |
+| `--no-redact` | off | Show full matched values instead of masking them |
+
+**Credential patterns detected:**
+
+| Rule ID | Severity | Pattern |
+|---------|----------|---------|
+| `ANTHROPIC_KEY` | CRITICAL | `sk-ant-...` |
+| `OPENAI_KEY` | CRITICAL | `sk-...` / `sk-proj-...` |
+| `AWS_ACCESS_KEY` | CRITICAL | `AKIA...` |
+| `GITHUB_TOKEN` | CRITICAL | `ghp_...` / `github_pat_...` |
+| `STRIPE_SECRET` | CRITICAL | `sk_live_...` |
+| `PRIVATE_KEY_BLOCK` | CRITICAL | `-----BEGIN ... PRIVATE KEY-----` |
+| `SLACK_TOKEN` | HIGH | `xoxb-...` / `xoxp-...` |
+| `GOOGLE_API_KEY` | HIGH | `AIza...` |
+| `HUGGINGFACE_TOKEN` | HIGH | `hf_...` |
+| `DATABASE_URL` | HIGH | `postgresql://user:pass@host` |
+| `JWT_TOKEN` | MEDIUM | `eyJ...eyJ...` (memory + config files only) |
+| `GENERIC_API_KEY` | MEDIUM | `api_key = "..."` (config files only) |
+| `GENERIC_PASSWORD` | MEDIUM | `password = "..."` (config files only) |
+
+Note: credentials found inside agent memory files are automatically upgraded to CRITICAL
+severity — memory files are commonly committed to git with no secrets management in place.
+
+**Singapore PII (PDPA-sensitive):**
+
+| Rule ID | Severity | Description |
+|---------|----------|-------------|
+| `SG_NRIC` | HIGH | NRIC/FIN — checksum-validated (S/T/F/G/M prefix + weighted mod-11) |
+| `SG_PASSPORT` | HIGH | Singapore passport number (E/K series) |
+| `SG_PHONE_MOBILE` | MEDIUM | Mobile (+65 8xxx / 9xxx) |
+| `SG_PHONE_LANDLINE` | LOW | Landline with explicit `+65` prefix |
+| `SG_UEN` | LOW | Business Unique Entity Number |
+| `SG_ADDRESS_POSTAL` | LOW | "Singapore XXXXXX" postal code |
+
+**Memory contamination rules:**
+
+| Rule ID | Severity | Trigger |
+|---------|----------|---------|
+| `CONVERSATION_PII` | HIGH | Email + NRIC (SGP) or Email + SSN (USA) within 5 lines — strong indicator of a raw tool call result leaked into memory |
+| `SYSTEM_PROMPT_IN_MEMORY` | MEDIUM | "You are a..." / "Your instructions are..." patterns in memory files — system prompts reveal agent instructions if memory committed to git |
+
+**Exit codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | No findings at `--fail-on` threshold |
+| 1 | Findings at or above `--fail-on` severity |
+| 2 | Scan error (permission denied, no readable files) |
+
+---
+
 ### `sentinel discover` — find AI agents in your environment
 
 ```bash
@@ -254,9 +353,9 @@ sentinel discover --format json          # machine-readable output
 | OWASP LLM | sentinel command |
 |-----------|-----------------|
 | LLM01 Prompt Injection | `sentinel probe`, `sentinel ai-probe` |
-| LLM02 Sensitive Info Disclosure | `sentinel probe` (extraction category) |
+| LLM02 Sensitive Info Disclosure | `sentinel secrets`, `sentinel probe` (extraction) |
 | LLM06 Excessive Agency | `sentinel scan`, `sentinel discover` |
-| LLM07 System Prompt Leakage | `sentinel probe` (extraction), `sentinel ai-probe` |
+| LLM07 System Prompt Leakage | `sentinel secrets` (memory contamination), `sentinel probe` (extraction) |
 | LLM08 Vector/Embedding Weaknesses | `sentinel mcp scan` |
 
 ---
@@ -265,6 +364,11 @@ sentinel discover --format json          # machine-readable output
 
 ```yaml
 # .github/workflows/security.yml
+- name: Scan for secrets and PII in agent memory
+  run: |
+    pip install agentsentinel-cli
+    sentinel secrets . --fail-on HIGH
+
 - name: Audit agent posture
   run: |
     pip install agentsentinel-cli
@@ -281,6 +385,8 @@ sentinel discover --format json          # machine-readable output
     sentinel mcp scan http://localhost:3001 --fail-on CRITICAL
 ```
 
+`sentinel secrets` requires no extra dependencies — it's included in the base install.
+
 ---
 
 ## Tool detection (`sentinel scan`)
@@ -296,9 +402,11 @@ The scanner detects tools defined via:
 ## Requirements
 
 - Python 3.10+
-- No API key required for `sentinel scan`, `sentinel inspect --no-ai`, `sentinel probe`
+- No API key required for `sentinel scan`, `sentinel secrets`, `sentinel inspect --no-ai`, `sentinel probe`
 - `ANTHROPIC_API_KEY` required for AI summary (`sentinel inspect`), `sentinel ai-probe`
 - `httpx` required for live endpoint inspection: `pip install "agentsentinel-cli[inspect]"`
 - `httpx` required for HTTP MCP scanning: `pip install "agentsentinel-cli[mcp]"`
 - `psutil` + `httpx` required for `sentinel discover`: `pip install "agentsentinel-cli[discover]"`
 - `httpx` + `anthropic` required for `sentinel ai-probe`: `pip install "agentsentinel-cli[ai-probe]"`
+
+`sentinel secrets` has zero extra dependencies — regex-based, fully offline, no API calls.
