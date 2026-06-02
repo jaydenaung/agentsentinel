@@ -6,7 +6,9 @@ credentials are found inside agent memory paths (higher impact — often git-com
 """
 
 import dataclasses
+import os
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from agentsentinel_cli.secrets_rules import (
@@ -68,12 +70,52 @@ _SKIP_EXTS: frozenset[str] = frozenset({
     ".dylib", ".zip", ".tar", ".gz", ".bz2", ".7z", ".pdf",
     ".pkl", ".pt", ".onnx", ".safetensors", ".parquet", ".arrow",
 })
-_SKIP_DIRS: frozenset[str] = frozenset({
-    "__pycache__", "node_modules", ".tox", "venv", ".venv",
-    "dist", "build", ".eggs", "site-packages",
+
+# Directories pruned at walk time — os.walk never descends into these.
+# This is what makes the scan fast: rglob("*") traverses everything first;
+# os.walk with pruning skips entire subtrees like node_modules and .venv.
+_PRUNE_DIRS: frozenset[str] = frozenset({
+    # Version control
+    ".git", ".svn", ".hg",
+    # Python virtual environments
+    "venv", ".venv", "env",
+    # Python build / caches
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".tox", ".eggs", "site-packages", "dist", "build",
+    # JavaScript / frontend
+    "node_modules", ".next", ".nuxt", ".parcel-cache",
+    # Other language build outputs
+    "target",   # Rust
+    "vendor",   # Go / Ruby
+    # Test coverage
+    "htmlcov", ".coverage",
 })
 
 _MAX_FILE_BYTES = 1_000_000  # skip files larger than 1 MB
+
+
+def _iter_files(root: Path) -> Iterator[Path]:
+    """Walk root using os.walk with directory pruning.
+
+    Prunes entire subtrees (node_modules, .venv, .git, etc.) before any file
+    enumeration — dramatically faster than rglob("*") + post-filter for typical
+    agent project layouts.
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        # Modify dirnames in-place: os.walk will not descend into pruned dirs.
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _PRUNE_DIRS
+            and not d.endswith(".egg-info")
+        ]
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if path.suffix.lower() not in _SKIP_EXTS:
+                try:
+                    if path.stat().st_size <= _MAX_FILE_BYTES:
+                        yield path
+                except OSError:
+                    pass
 
 
 def _classify_file(path: Path) -> str:
@@ -105,18 +147,13 @@ def _classify_file(path: Path) -> str:
 
 
 def _should_skip(path: Path) -> bool:
-    """Return True if this file should not be scanned."""
+    """Return True for a single file that should not be scanned.
+
+    Directory-level pruning is handled by _iter_files; this function only needs
+    to check extension and size for individual files.
+    """
     if path.suffix.lower() in _SKIP_EXTS:
         return True
-    parts = set(path.parts)
-    if parts & _SKIP_DIRS:
-        return True
-    # Skip hidden directories except .env files and .claude
-    for part in path.parts[:-1]:
-        if part.startswith(".") and part not in {".claude", ".env", ".langchain",
-                                                  ".autogen", ".crewai", ".mem0",
-                                                  ".openai_agents"}:
-            return True
     try:
         return path.stat().st_size > _MAX_FILE_BYTES
     except OSError:
@@ -264,25 +301,30 @@ def scan_secrets(
     target: Path,
     scope: str = "all",
     redact: bool = True,
+    progress_cb: Callable[[int, str], None] | None = None,
 ) -> SecretsReport:
     """Scan target path for secrets, PII, and AI memory contamination.
 
     Args:
-        target: File or directory to scan.
-        scope:  'all' | 'memory' | 'config' — restricts which file types are scanned.
-        redact: If True (default), match previews are partially masked in the report.
+        target:      File or directory to scan.
+        scope:       'all' | 'memory' | 'config' — restricts which file types are scanned.
+        redact:      If True (default), match previews are partially masked in the report.
+        progress_cb: Optional callable(n_files_done, current_file_path) for live progress.
     """
     t0 = time.monotonic()
     target = target.resolve()
 
-    candidates = list(target.rglob("*")) if target.is_dir() else [target]
-    files = [f for f in candidates if f.is_file() and not _should_skip(f)]
-
     findings: list[SecretFinding] = []
     memory_files: list[Path] = []
-    n_memory = n_config = 0
+    n_scanned = n_memory = n_config = 0
 
-    for f in files:
+    file_iter = _iter_files(target) if target.is_dir() else iter([target])
+
+    for f in file_iter:
+        n_scanned += 1
+        if progress_cb:
+            progress_cb(n_scanned, str(f))
+
         ft = _classify_file(f)
         if ft == "memory":
             memory_files.append(f)
@@ -294,13 +336,12 @@ def scan_secrets(
     root = target if target.is_dir() else target.parent
     gitignore_warnings = _check_gitignore(root, memory_files)
 
-    # Sort by severity rank, then file path, then line number
     _rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
     findings.sort(key=lambda x: (_rank.get(x.severity, 4), str(x.file), x.line))
 
     return SecretsReport(
         target=target,
-        files_scanned=len(files),
+        files_scanned=n_scanned,
         memory_files_scanned=n_memory,
         config_files_scanned=n_config,
         findings=findings,

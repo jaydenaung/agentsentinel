@@ -664,8 +664,28 @@ def secrets(
     """
     from agentsentinel_cli.secrets import scan_secrets
     from agentsentinel_cli.secrets_report import print_secrets_result, as_secrets_json
+    from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-    report = scan_secrets(target, scope=scope, redact=not no_redact)
+    _report_holder: list = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]{task.description}[/dim]"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,   # clears the progress line when done
+    ) as progress:
+        task = progress.add_task("Scanning...", total=None)
+
+        def _on_progress(n: int, current: str) -> None:
+            short = current[-50:] if len(current) > 50 else current
+            progress.update(task, description=f"Scanning [bold]{n}[/bold] files  [dim]{short}[/dim]")
+
+        _report_holder.append(
+            scan_secrets(target, scope=scope, redact=not no_redact, progress_cb=_on_progress)
+        )
+
+    report = _report_holder[0]
 
     if fmt == "json":
         click.echo(as_secrets_json(report))
