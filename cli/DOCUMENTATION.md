@@ -15,6 +15,7 @@ No server required. No Docker. Works on any Python agent file or live HTTP endpo
 - [Commands](#commands)
   - [sentinel inspect](#sentinel-inspect)
   - [sentinel scan](#sentinel-scan)
+  - [sentinel secrets](#sentinel-secrets)
   - [sentinel discover](#sentinel-discover)
   - [sentinel mcp scan](#sentinel-mcp-scan)
   - [sentinel probe](#sentinel-probe)
@@ -68,7 +69,7 @@ sentinel --version
 
 ## Quick Start
 
-Five commands that cover the full picture in under 5 minutes:
+Six commands that cover the full picture in under 10 minutes:
 
 ```bash
 # 1. What is this agent? (fingerprint + plain English summary)
@@ -77,13 +78,16 @@ sentinel inspect my_agent.py
 # 2. Does it have dangerous permissions? (posture audit)
 sentinel scan my_agent.py
 
-# 3. Is the MCP server it connects to secure?
+# 3. Has it leaked credentials or customer PII into memory files?
+sentinel secrets .
+
+# 4. Is the MCP server it connects to secure?
 sentinel mcp scan http://localhost:3000
 
-# 4. Can it be jailbroken? (42-payload attack battery)
+# 5. Can it be jailbroken? (42-payload attack battery)
 sentinel probe http://my-agent.com/chat
 
-# 5. Deep red-team with Claude as the attacker (needs ANTHROPIC_API_KEY)
+# 6. Deep red-team with Claude as the attacker (needs ANTHROPIC_API_KEY)
 sentinel ai-probe http://my-agent.com/chat
 ```
 
@@ -277,6 +281,196 @@ sentinel scan my_agent.py --connect http://localhost:9000 --api-key $AGENTSENTIN
               Agent holds dangerous tool grants. Verify intent and add rate limits.
 
   Posture Score  34/100  CRITICAL
+```
+
+---
+
+### sentinel secrets
+
+**What problem it solves:** AI agents process sensitive data — customer records, credentials,
+system prompts — and many frameworks persist this to local memory files (`.md`, `.json`,
+conversation logs). Developers commit these files to git without realising they contain
+customer NRICs, email addresses, or API keys captured from tool call results.
+`sentinel secrets` finds what leaked where — before an attacker does.
+
+Zero extra dependencies. Fully offline. No API calls.
+
+```
+sentinel secrets [TARGET] [OPTIONS]
+```
+
+TARGET defaults to `.` (current directory, scanned recursively).
+
+#### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--scope [all\|memory\|config]` | `all` | Restrict scan to memory files, config/env files, or both |
+| `--severity [CRITICAL\|HIGH\|MEDIUM\|LOW]` | `MEDIUM` | Minimum severity level to display |
+| `--format [text\|json]` | `text` | Output format |
+| `--fail-on [CRITICAL\|HIGH\|MEDIUM\|LOW]` | — | Exit code 1 if findings reach this severity |
+| `--no-redact` | off | Show full matched values instead of masking them |
+
+#### Detection layers
+
+**Layer 1 — Credentials** (all file types)
+
+| Rule ID | Severity | Pattern |
+|---------|----------|---------|
+| `ANTHROPIC_KEY` | CRITICAL | `sk-ant-api03-...` |
+| `OPENAI_KEY` | CRITICAL | `sk-...` / `sk-proj-...` |
+| `AWS_ACCESS_KEY` | CRITICAL | `AKIA[16 chars]` |
+| `GITHUB_TOKEN` | CRITICAL | `ghp_...` / `github_pat_...` |
+| `STRIPE_SECRET` | CRITICAL | `sk_live_...` |
+| `PRIVATE_KEY_BLOCK` | CRITICAL | `-----BEGIN ... PRIVATE KEY-----` |
+| `SLACK_TOKEN` | HIGH | `xoxb-...` / `xoxp-...` |
+| `GOOGLE_API_KEY` | HIGH | `AIza[35 chars]` |
+| `HUGGINGFACE_TOKEN` | HIGH | `hf_[34 chars]` |
+| `DATABASE_URL` | HIGH | `postgresql://user:pass@host` |
+| `JWT_TOKEN` | MEDIUM | `eyJ...eyJ...` (memory + config only) |
+| `GENERIC_API_KEY` | MEDIUM | `api_key = "..."` (config files only) |
+| `GENERIC_PASSWORD` | MEDIUM | `password = "..."` (config files only) |
+
+> **Note:** Any credential found inside an agent memory file is automatically upgraded to
+> CRITICAL severity. Memory files are routinely committed to git with no secrets management.
+
+**Layer 2 — PII (global)** (memory + config files)
+
+| Rule ID | Severity | Description |
+|---------|----------|-------------|
+| `EMAIL_ADDRESS` | MEDIUM | Email addresses (`user@domain.tld`) |
+| `CREDIT_CARD` | HIGH | Visa / MC / Amex / Discover — Luhn-validated |
+| `US_SSN` | HIGH | US Social Security Number (`DDD-DD-DDDD`) — structurally validated |
+| `US_PHONE` | LOW | US phone numbers (memory files only) |
+
+**Layer 2 — PII (Singapore / PDPA)** (memory + config files unless noted)
+
+| Rule ID | Severity | Description |
+|---------|----------|-------------|
+| `SG_NRIC` | HIGH | NRIC/FIN — weighted mod-11 checksum validated (S/T/F/G/M prefix). Scans all file types. |
+| `SG_PASSPORT` | HIGH | Singapore passport (E/K series). Scans all file types. |
+| `SG_PHONE_MOBILE` | MEDIUM | Mobile number (`+65 8xxx xxxx` / `+65 9xxx xxxx`) |
+| `SG_PHONE_LANDLINE` | LOW | Landline — requires explicit `+65` prefix to reduce false positives |
+| `SG_UEN` | LOW | Unique Entity Number (business registration) |
+| `SG_ADDRESS_POSTAL` | LOW | `Singapore XXXXXX` postal address |
+
+**Layer 3 — Memory contamination** (memory files only)
+
+These compound rules look at file content holistically, not line by line.
+
+| Rule ID | Severity | Trigger condition |
+|---------|----------|-------------------|
+| `CONVERSATION_PII` | HIGH | Email + NRIC (SGP) **or** Email + SSN (USA) within 5 lines of each other. Strong indicator that a raw CRM or database tool call result leaked into memory. |
+| `SYSTEM_PROMPT_IN_MEMORY` | MEDIUM | "You are a..." / "Your instructions are..." patterns in the first 30 lines of a memory file. System prompts in memory reveal agent instructions if the file is committed to git. |
+
+#### Memory path registry
+
+`sentinel secrets` knows where agent frameworks store memory and automatically classifies these
+as high-sensitivity memory files:
+
+| Framework | Paths scanned |
+|-----------|--------------|
+| Claude Code | `~/.claude/projects/*/memory/` |
+| LangChain | `.langchain/`, `memory/*.json`, `langchain_cache/` |
+| AutoGen | `.autogen/`, `autogen_cache/` |
+| CrewAI | `crew_workspace/`, `.crewai/` |
+| Mem0 | `.mem0/`, `mem0_storage/` |
+| OpenAI Agents | `.openai_agents/`, `agent_workspace/` |
+| Generic | `memory/`, `*_memory.md`, `conversation_history*.json`, `agent_logs/` |
+
+Any file inside one of these directories is treated as a memory file and scanned with all
+three detection layers. Config files (`.env`, `*.yaml`, `*.toml`, etc.) receive credential
+and PII scanning. Source files receive credential scanning only (to avoid false positives
+from example data in docstrings and comments).
+
+#### .gitignore check
+
+`sentinel secrets` warns if agent memory directories are not covered by `.gitignore`, since
+memory files often contain the most sensitive data in an AI project.
+
+#### Examples
+
+```bash
+# Scan everything in the current directory
+sentinel secrets .
+
+# Scan your Claude Code agent memory for leaked PII
+sentinel secrets ~/.claude/projects/
+
+# Memory files only (fastest, most sensitive findings)
+sentinel secrets . --scope memory
+
+# Config and env files only (credential scan)
+sentinel secrets . --scope config
+
+# Only show HIGH and CRITICAL (for daily monitoring)
+sentinel secrets . --severity HIGH
+
+# CI gate — break the build if HIGH+ findings exist
+sentinel secrets . --fail-on HIGH
+
+# Machine-readable output for SIEM or dashboards
+sentinel secrets . --format json
+
+# Show full matched values (for investigation — use carefully)
+sentinel secrets . --no-redact
+
+# Scan a specific agent workspace
+sentinel secrets /path/to/my-agent/ --severity LOW
+
+# JSON output, extract only Singapore PII findings
+sentinel secrets . --format json | jq '.findings[] | select(.jurisdiction == "SGP")'
+
+# Extract all CRITICAL findings with file locations
+sentinel secrets . --format json | jq '.findings[] | select(.severity == "CRITICAL") | {rule_id, file, line}'
+```
+
+#### Example output
+
+```
+╭──────────────────────────────────────────────────╮
+│  AgentSentinel Secrets                           │
+│  Target: /my-agent/                              │
+╰──────────────────────────────────────────────────╯
+
+──────────────── CREDENTIALS ─────────────────────
+
+  ● CRITICAL  ANTHROPIC_KEY ✓validated  memory/session_42.md:14
+              sk-ant[REDACTED]
+              → Rotate at console.anthropic.com/settings/api-keys
+
+  ● HIGH      DATABASE_URL ✓validated  .env:3
+              postgr[REDACTED]
+              → Move database credentials to environment variables
+
+──────────────────── PII ─────────────────────────
+
+  ● HIGH      SG_NRIC (SGP — PDPA) ✓validated  memory/session_42.md:23
+              S12345[REDACTED]
+              NRIC: S123[REDACTED]
+              → NRIC/FIN is protected under Singapore PDPA. Purge from memory.
+
+  ● MEDIUM    EMAIL_ADDRESS  memory/session_42.md:24
+              john.t[REDACTED]
+              → Remove personal email from agent memory files.
+
+──────────────── MEMORY CONTAMINATION ────────────
+
+  ● HIGH      CONVERSATION_PII (SGP — PDPA) ✓validated  memory/session_42.md:23
+              [email + NRIC cluster]
+              Email line 24, NRIC line 23
+              → Singapore customer PII cluster — likely leaked from CRM tool call.
+
+  ● MEDIUM    SYSTEM_PROMPT_IN_MEMORY ✓validated  memory/session_42.md:1
+              You are a helpful customer service assistant for...
+              → System prompt content in memory file. Will be committed to git.
+
+──────────────── WARNINGS ────────────────────────
+
+  ⚠  memory/ is not covered by .gitignore — memory files may be committed to git
+
+──────────────────────────────────────────────────
+  12 files scanned (4 memory · 3 config)  ·  CRITICAL:1  HIGH:3  MEDIUM:2  LOW:0  ·  0.1s
 ```
 
 ---
@@ -674,15 +868,18 @@ sentinel inspect ./my_agent.py
 # Step 2 — static posture check
 sentinel scan ./my_agent.py --fail-on HIGH
 
-# Step 3 — start the agent locally, probe it
+# Step 3 — check for leaked secrets or PII in the workspace
+sentinel secrets . --fail-on HIGH
+
+# Step 4 — start the agent locally, probe it
 sentinel probe http://localhost:8000/chat --attacks injection,jailbreak,extraction
 
-# Step 4 — deep AI red-team
+# Step 5 — deep AI red-team
 sentinel ai-probe http://localhost:8000/chat \
   --context "Customer-facing chatbot for e-commerce, handles order history and returns" \
   --max-probes 30
 
-# Step 5 — if it has an MCP server, audit that too
+# Step 6 — if it has an MCP server, audit that too
 sentinel mcp scan http://localhost:3000 --fail-on CRITICAL
 ```
 
@@ -736,6 +933,9 @@ Run daily or on every deployment.
 
 set -e
 
+echo "=== Secrets and PII Scan ==="
+sentinel secrets . --fail-on HIGH --format json >> reports/secrets-$(date +%Y%m%d).json
+
 echo "=== Agent Posture Scan ==="
 sentinel scan ./agents/ --fail-on CRITICAL --format json >> reports/scan-$(date +%Y%m%d).json
 
@@ -749,6 +949,33 @@ sentinel probe http://staging-agent.internal/chat \
 
 echo "Done."
 ```
+
+---
+
+### Workflow 6: Singapore PDPA compliance check
+
+Your agent processes customer data under Singapore's Personal Data Protection Act.
+
+```bash
+# Scan for any Singapore PII that leaked into agent memory or configs
+sentinel secrets . --format json \
+  | jq '.findings[] | select(.jurisdiction == "SGP")' \
+  > pdpa-findings.json
+
+# Count NRIC exposures specifically
+sentinel secrets . --format json \
+  | jq '[.findings[] | select(.rule_id == "SG_NRIC")] | length'
+
+# Full audit — memory files only, all severity levels
+sentinel secrets . --scope memory --severity LOW
+
+# Fail CI if any Singapore PII found in memory files
+sentinel secrets . --scope memory --fail-on MEDIUM
+```
+
+NRICs are validated using the official Singapore weighted mod-11 checksum algorithm before
+being reported — false positive rate is negligible. Any `SG_NRIC` finding with
+`"validated": true` in JSON output is a structurally valid identity number.
 
 ---
 
@@ -774,6 +1001,9 @@ jobs:
       - name: Inspect agents
         run: sentinel inspect ./agents/ --no-ai --format json
 
+      - name: Secrets and PII scan — fail on HIGH
+        run: sentinel secrets . --fail-on HIGH
+
       - name: Posture scan — fail on CRITICAL
         run: sentinel scan ./agents/ --fail-on CRITICAL
 
@@ -797,6 +1027,7 @@ agent-security:
   before_script:
     - pip install "agentsentinel-cli[all]"
   script:
+    - sentinel secrets . --fail-on HIGH
     - sentinel scan ./agents/ --fail-on CRITICAL
     - sentinel mcp scan http://mcp-server:3000 --fail-on HIGH
   artifacts:
@@ -809,6 +1040,7 @@ agent-security:
 ```bash
 #!/bin/bash
 # .git/hooks/pre-commit
+sentinel secrets . --fail-on HIGH   # catch leaked keys/PII before they hit git history
 sentinel scan . --fail-on CRITICAL
 ```
 
@@ -821,9 +1053,9 @@ sentinel scan . --fail-on CRITICAL
 | OWASP LLM | Risk | sentinel command |
 |-----------|------|-----------------|
 | LLM01 Prompt Injection | Attackers manipulate agent via crafted inputs | `sentinel probe`, `sentinel ai-probe` |
-| LLM02 Sensitive Info Disclosure | Agent leaks system prompts, data | `sentinel probe --attacks extraction`, `sentinel ai-probe` |
+| LLM02 Sensitive Info Disclosure | Agent leaks credentials, PII, or customer data | `sentinel secrets`, `sentinel probe --attacks extraction` |
 | LLM06 Excessive Agency | Agent has more permissions than needed | `sentinel scan`, `sentinel discover` |
-| LLM07 System Prompt Leakage | System prompt extracted by attacker | `sentinel probe --attacks extraction` |
+| LLM07 System Prompt Leakage | System prompt extracted or persisted to memory | `sentinel secrets` (memory contamination), `sentinel probe --attacks extraction` |
 | LLM08 Vector/Embedding Weaknesses | MCP servers expose vector DB tools unsafely | `sentinel mcp scan` |
 
 ---
@@ -912,6 +1144,7 @@ sentinel mcp scan http://mcp-server.internal:3000 --format json \
 sentinel --help
 sentinel inspect --help
 sentinel scan --help
+sentinel secrets --help
 sentinel discover --help
 sentinel mcp scan --help
 sentinel probe --help
