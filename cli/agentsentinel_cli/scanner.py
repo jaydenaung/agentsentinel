@@ -46,16 +46,20 @@ _KNOWN_MODELS = (
     "command", "titan", "nova",
 )
 _TOOL_CATEGORIES = {
-    "database":      ("database", "db", "sql", "query", "postgres", "mysql", "mongo"),
+    "database":      ("database", "db", "sql", "query", "postgres", "mysql", "mongo", "dynamo", "redis"),
+    "storage":       ("s3", "bucket", "object", "blob", "gcs", "object_store", "storage", "get_object",
+                      "put_object", "list_bucket", "list_objects", "presigned"),
     "filesystem":    ("file", "directory", "disk", "path", "read_file", "write_file"),
     "web":           ("http", "fetch", "url", "web", "scrape", "browse", "request"),
-    "communication": ("email", "smtp", "slack", "webhook", "notify", "send_message"),
+    "communication": ("email", "smtp", "slack", "webhook", "notify", "send_message", "sns", "sqs"),
     "code_execution":("exec", "bash", "shell", "run_code", "eval", "terminal", "subprocess", "python_repl"),
-    "secrets":       ("secret", "credential", "vault", "token", "password", "api_key", "read_env"),
+    "secrets":       ("secret", "credential", "vault", "token", "password", "api_key", "read_env",
+                      "ssm", "secrets_manager"),
     "admin":         ("admin", "iam", "role", "permission", "policy", "sudo", "privilege"),
     "crm":           ("crm", "customer", "account", "contact", "salesforce", "hubspot"),
     "analytics":     ("analytics", "metric", "report", "dashboard", "bi", "insight"),
-    "infrastructure":("deploy", "container", "k8s", "kubernetes", "aws", "gcp", "azure", "terraform"),
+    "infrastructure":("deploy", "container", "k8s", "kubernetes", "aws", "gcp", "azure", "terraform",
+                      "ec2", "lambda", "ecs", "cloudformation"),
 }
 
 # Credential detection

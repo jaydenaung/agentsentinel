@@ -512,6 +512,113 @@ def ai_probe(
             sys.exit(1)
 
 
+# ── sentinel inspect ──────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("target")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text",
+              help="Output format.")
+@click.option("--no-ai", "skip_ai", is_flag=True, default=False,
+              help="Skip Claude AI summary even if ANTHROPIC_API_KEY is set.")
+@click.option("--model", default="claude-haiku-4-5-20251001", show_default=True,
+              help="Claude model used for AI summary generation.")
+@click.option("--auth-header", "auth_header", default=None, metavar="HEADER",
+              help="HTTP auth header for live endpoint inspection, e.g. 'Authorization: Bearer token'.")
+@click.option("--fail-on", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+              default=None, help="Exit with code 1 if findings at or above this severity exist.")
+def inspect(
+    target: str,
+    fmt: str,
+    skip_ai: bool,
+    model: str,
+    auth_header: str | None,
+    fail_on: str | None,
+) -> None:
+    """Generate an intelligence report for an AI agent.
+
+    TARGET can be a Python file, a directory, or a live HTTP endpoint URL.
+    Shows framework, model, deployment, capabilities, data flows, and trust score.
+    With ANTHROPIC_API_KEY set, adds a plain English summary of what the agent does.
+
+    \b
+    Examples:
+        sentinel inspect my_agent.py
+        sentinel inspect ./agents/
+        sentinel inspect http://localhost:3000
+        sentinel inspect my_agent.py --format json
+        sentinel inspect my_agent.py --no-ai
+    """
+    import os
+    from agentsentinel_cli.inspect import inspect_file, inspect_live
+    from agentsentinel_cli.inspect_report import print_inspect_result, as_inspect_json
+
+    api_key = "" if skip_ai else os.environ.get("ANTHROPIC_API_KEY", "")
+
+    if target.startswith("http://") or target.startswith("https://"):
+        extra_headers: dict[str, str] = {}
+        if auth_header:
+            if ":" not in auth_header:
+                console.print("[red]Error:[/red] --auth-header must be 'Header-Name: value' format.")
+                sys.exit(1)
+            k, _, v = auth_header.partition(":")
+            extra_headers[k.strip()] = v.strip()
+
+        report = inspect_live(
+            target,
+            extra_headers=extra_headers or None,
+            api_key=api_key,
+            summary_model=model,
+        )
+    else:
+        path = Path(target)
+        if not path.exists():
+            console.print(f"[red]Error:[/red] path does not exist: {target}")
+            sys.exit(1)
+
+        if path.is_dir():
+            # Inspect all agent files in directory, report each
+            from agentsentinel_cli.inspect import inspect_file as _inspect
+            from agentsentinel_cli.scanner import scan_path as _scan
+            agents = _scan(path)
+            if not agents:
+                console.print(f"[yellow]No agent files detected in:[/yellow] {target}")
+                sys.exit(0)
+            reports = []
+            for agent in agents:
+                r = _inspect(agent.file, api_key=api_key, summary_model=model)
+                if r:
+                    reports.append(r)
+            if fmt == "json":
+                import json as _json
+                click.echo(_json.dumps([_json.loads(as_inspect_json(r)) for r in reports], indent=2))
+            else:
+                for r in reports:
+                    print_inspect_result(r)
+            if fail_on:
+                _rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+                threshold = _rank.get(fail_on, 0)
+                if any(_rank.get(f.severity, 0) >= threshold for r in reports for f in r.findings):
+                    sys.exit(1)
+            return
+
+        report = inspect_file(path, api_key=api_key, summary_model=model)
+        if report is None:
+            console.print(f"[yellow]No agent signals detected in:[/yellow] {target}")
+            console.print("  Is this an agent file with @tool decorators, Tool() definitions, or known framework imports?")
+            sys.exit(0)
+
+    if fmt == "json":
+        click.echo(as_inspect_json(report))
+    else:
+        print_inspect_result(report)
+
+    if fail_on:
+        _rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+        threshold = _rank.get(fail_on, 0)
+        if any(_rank.get(f.severity, 0) >= threshold for f in report.findings):
+            sys.exit(1)
+
+
 def _parse_ports(ports_str: str) -> list[int]:
     """Parse '8000-9001' or '8000,8080,9000' into a list of ints."""
     ports: list[int] = []
