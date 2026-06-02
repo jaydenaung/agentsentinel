@@ -619,6 +619,66 @@ def inspect(
             sys.exit(1)
 
 
+# ── sentinel secrets ─────────────────────────────────────────────────────────
+
+@main.command()
+@click.argument("target", default=".", type=click.Path(exists=True, path_type=Path))
+@click.option("--scope", type=click.Choice(["all", "memory", "config"]), default="all",
+              show_default=True,
+              help="Scan scope: all files, memory files only, or config/env files only.")
+@click.option("--severity", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+              default="MEDIUM", show_default=True,
+              help="Minimum severity level to display.")
+@click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text",
+              help="Output format.")
+@click.option("--fail-on", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"]),
+              default=None,
+              help="Exit with code 1 if findings at or above this severity exist.")
+@click.option("--no-redact", is_flag=True, default=False,
+              help="Show full matched values instead of redacting them.")
+def secrets(
+    target: Path,
+    scope: str,
+    severity: str,
+    fmt: str,
+    fail_on: str | None,
+    no_redact: bool,
+) -> None:
+    """Scan for exposed secrets, API keys, and PII in agent files and memory.
+
+    Detects credentials (Anthropic, OpenAI, AWS, GitHub, Stripe, Google, HuggingFace),
+    global PII (email, credit card, US SSN), Singapore PII (NRIC/FIN with checksum
+    validation, passport, mobile, landline, UEN, postal code), and memory contamination
+    patterns (customer PII clusters leaked from tool call results, system prompt leakage).
+
+    \b
+    Examples:
+        sentinel secrets .                       scan current directory
+        sentinel secrets ~/.claude/projects/     scan Claude Code agent memory
+        sentinel secrets . --scope memory        memory files only
+        sentinel secrets . --scope config        config/env files only
+        sentinel secrets . --severity HIGH       show HIGH and CRITICAL only
+        sentinel secrets . --format json         machine-readable output
+        sentinel secrets . --fail-on HIGH        exit 1 if any HIGH+ findings
+        sentinel secrets . --no-redact           show full matched values
+    """
+    from agentsentinel_cli.secrets import scan_secrets
+    from agentsentinel_cli.secrets_report import print_secrets_result, as_secrets_json
+
+    report = scan_secrets(target, scope=scope, redact=not no_redact)
+
+    if fmt == "json":
+        click.echo(as_secrets_json(report))
+    else:
+        print_secrets_result(report, min_severity=severity)
+
+    if fail_on:
+        _rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+        threshold = _rank.get(fail_on, 0)
+        if any(_rank.get(f.severity, 0) >= threshold for f in report.findings):
+            sys.exit(1)
+
+
 def _parse_ports(ports_str: str) -> list[int]:
     """Parse '8000-9001' or '8000,8080,9000' into a list of ints."""
     ports: list[int] = []
