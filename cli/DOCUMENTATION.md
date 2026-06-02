@@ -301,6 +301,38 @@ sentinel secrets [TARGET] [OPTIONS]
 
 TARGET defaults to `.` (current directory, scanned recursively).
 
+#### Running it for the first time
+
+Start with the broadest scan — current directory, default severity (MEDIUM and above):
+
+```bash
+cd your-agent-project/
+sentinel secrets .
+```
+
+If you get no output, your project is clean at MEDIUM+. Run with `--severity LOW` to see
+everything including low-confidence findings.
+
+If you get findings, work through them top to bottom — CRITICAL first. Credentials must be
+rotated immediately. PII in memory files needs to be purged and the source (which tool call
+produced it) investigated.
+
+**Recommended scan order for a new project:**
+
+```bash
+# 1. Full scan, see the big picture
+sentinel secrets .
+
+# 2. Narrow to memory files — this is where PII most often hides
+sentinel secrets . --scope memory --severity LOW
+
+# 3. Check configs separately (credential focus)
+sentinel secrets . --scope config
+
+# 4. Scan Claude Code's own memory for this project
+sentinel secrets ~/.claude/projects/ --severity LOW
+```
+
 #### Options
 
 | Flag | Default | Description |
@@ -310,6 +342,17 @@ TARGET defaults to `.` (current directory, scanned recursively).
 | `--format [text\|json]` | `text` | Output format |
 | `--fail-on [CRITICAL\|HIGH\|MEDIUM\|LOW]` | — | Exit code 1 if findings reach this severity |
 | `--no-redact` | off | Show full matched values instead of masking them |
+
+#### Choosing the right scope
+
+| Scope | What it scans | When to use |
+|-------|--------------|-------------|
+| `all` (default) | Memory files + config files + source files | First run, CI/CD gate, general audit |
+| `memory` | Agent memory files only (`.md`, `.json` in memory dirs, conversation logs) | Daily monitoring, post-session audit, fastest scan |
+| `config` | `.env`, `*.yaml`, `*.toml`, `docker-compose.yml`, etc. | Pre-commit hook on config changes, credential audit |
+
+Source files (`.py`, `.js`) are always scanned for credentials regardless of scope — a
+hardcoded `sk-ant-...` in Python source is CRITICAL no matter what scope is selected.
 
 #### Detection layers
 
@@ -472,6 +515,90 @@ sentinel secrets . --format json | jq '.findings[] | select(.severity == "CRITIC
 ──────────────────────────────────────────────────
   12 files scanned (4 memory · 3 config)  ·  CRITICAL:1  HIGH:3  MEDIUM:2  LOW:0  ·  0.1s
 ```
+
+#### Understanding the output
+
+Each finding block has four lines:
+
+```
+  ● CRITICAL  SG_NRIC (SGP — PDPA) ✓validated  memory/session_42.md:23
+              S12345[REDACTED]
+              NRIC: S123[REDACTED]
+              → NRIC/FIN is protected under Singapore PDPA. Purge from memory.
+```
+
+| Part | Meaning |
+|------|---------|
+| `●` + colour | Severity: red = CRITICAL, orange = HIGH, yellow = MEDIUM, dim = LOW |
+| `SG_NRIC` | Rule ID — matches the rule tables above |
+| `(SGP — PDPA)` | Jurisdiction tag — tells you which privacy law applies. `(SGP — PDPA)` = Singapore Personal Data Protection Act; no tag = globally applicable |
+| `✓validated` | The match passed a checksum or structural validator (NRIC mod-11, Luhn for credit cards, area-code check for SSNs). A validated finding is a confirmed true positive — not just a regex match. Absence of `✓validated` means the rule relies on pattern alone and has a higher false positive rate. |
+| `memory/session_42.md:23` | File path and line number — click to open directly in most editors |
+| `S12345[REDACTED]` | First 6 characters of the match + `[REDACTED]`. Enough to identify the type, not enough to reconstruct the secret. Use `--no-redact` to see the full value during investigation. |
+| `NRIC: S123[REDACTED]` | The surrounding line of text, with the sensitive part masked — gives context for where the data came from |
+| `→ ...` | Recommended remediation action |
+
+The **WARNINGS** section at the bottom is separate from findings — it reports structural
+problems like memory directories not covered by `.gitignore`.
+
+The **summary bar** shows total files scanned broken down by type, finding counts by severity,
+and scan duration.
+
+#### What to do when you find something
+
+**CRITICAL — credentials**
+
+Act immediately. A leaked API key is live until you rotate it.
+
+1. Rotate the credential first — do not wait. Links are in the `→` line of each finding.
+2. Check if the key appeared in git history: `git log --all -p | grep sk-ant-` — if yes, the history is compromised even if the file is deleted.
+3. Audit usage logs (Anthropic Console, AWS CloudTrail, GitHub audit log) for activity you did not authorise.
+4. Add the file or directory to `.gitignore` and remove the secret from the file.
+5. Consider using a secrets manager (AWS Secrets Manager, HashiCorp Vault, Doppler) to prevent recurrence.
+
+**HIGH — PII (NRIC, credit card, SSN)**
+
+1. Identify which tool call produced this data — look at the surrounding lines in the file for context (tool name, timestamp, query).
+2. Delete or purge the memory file contents: `echo "" > memory/session_42.md` or delete the file if the session is complete.
+3. If the file was ever committed to git, the PII is in history. Consider a history rewrite with `git filter-repo` or treat the repo as compromised for that data type.
+4. Review your agent's tool definitions — if a CRM or database tool is returning full customer records (including NRIC/SSN), add field filtering to return only what the agent needs.
+5. For Singapore NRIC under PDPA: if the data was accessed without consent or leaked outside the system, a data breach notification may be required.
+
+**MEDIUM — email addresses, system prompt leakage**
+
+1. Email addresses in memory files are lower urgency but indicate your agent is retaining more data than it needs. Check if memory retention is configured and reduce the session window.
+2. `SYSTEM_PROMPT_IN_MEMORY` is usually intentional (the agent wrote its own instructions to memory) but is a problem if the file gets committed — add `memory/` to `.gitignore`.
+
+**Memory contamination (`CONVERSATION_PII`)**
+
+This finding fires when an email address and an NRIC (or SSN) appear within 5 lines of
+each other in a memory file — a strong signal that a raw database or CRM record was written
+to memory by a tool call. The record contains at minimum two linked PII fields, which is
+more serious than either in isolation.
+
+Steps:
+1. Open the file at the reported line. Read the surrounding context to identify the tool that produced the data.
+2. Determine whether the tool call was authorised and whether the data was needed.
+3. Purge the memory file.
+4. If the tool legitimately needs customer records, modify it to return only the fields required (not full rows).
+
+#### False positives
+
+`✓validated` findings are rarely false positives — the validators are conservative by design.
+Findings without `✓validated` have a higher false positive rate.
+
+Common false positives and how to handle them:
+
+| Finding | Common false positive cause | How to confirm |
+|---------|----------------------------|----------------|
+| `SG_PHONE_MOBILE` | Version numbers, port numbers like `8080 9000` | Use `--no-redact` and read the full match. A Singapore mobile is always 8 digits starting with 8 or 9. |
+| `EMAIL_ADDRESS` | Example emails in documentation (`user@example.com`) | Read the context line — documentation examples are usually surrounded by descriptive text |
+| `GENERIC_API_KEY` | Example keys in comments or README snippets | Check if the value looks like a real key (random alphanumeric, 20+ chars) vs a placeholder (`your-api-key-here`) |
+| `SG_UEN` | 9-digit numbers that happen to end in a letter | UENs are common in business documents — confirm the surrounding context |
+
+If a finding is a confirmed false positive, it does not affect the finding count for `--fail-on`
+evaluation — you still need to address it or suppress it by restructuring the content.
+Suppression via ignore-lists is not yet implemented (planned for v0.6).
 
 ---
 
