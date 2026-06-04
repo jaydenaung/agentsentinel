@@ -73,14 +73,12 @@ AgentSentinel is an enterprise AI agent security platform that continuously moni
 
 ---
 
-## Integrations
+## Related
 
-| Component | Install | Docs |
-|-----------|---------|------|
-| **CLI** (`discover` + `scan`) | `pip install "agentsentinel-cli[discover]"` | [Part 5 ↓](#part-5--cli) |
-| **LangChain** | `pip install agentsentinel-langchain` | [Part 4 ↓](#part-4--langchain-integration) |
-
-More integrations coming: OpenAI Agents SDK, AWS Bedrock Agents, CrewAI, AutoGen.
+| Tool | What it is |
+|------|-----------|
+| **[agentsentinel-cli](https://github.com/jaydenaung/agentsentinel-cli)** | Standalone security CLI — MCP server discovery, static analysis, supply chain audit, multi-agent trust analysis. `pipx install agentsentinel-cli` |
+| **LangChain integration** | `pip install agentsentinel-langchain` — zero-code monitoring for LangChain agents |
 
 ---
 
@@ -983,224 +981,29 @@ python example.py
 
 ## Part 5 — CLI
 
-The AgentSentinel CLI gives you two commands. **No server, no Docker, no setup.**
+> **The CLI has evolved into its own project.**
+>
+> The `cli/` directory has been removed from this repository. The CLI is now maintained and released independently at:
+>
+> **[github.com/jaydenaung/agentsentinel-cli](https://github.com/jaydenaung/agentsentinel-cli)**
 
 ```bash
-pip install "agentsentinel-cli[discover]"   # full install (recommended)
-pip install agentsentinel-cli               # scan only (no psutil/httpx)
+pipx install agentsentinel-cli
 ```
 
-| Command | What it does |
-|---------|-------------|
-| `sentinel discover` | Find AI agents running in your environment — processes, ports, subnets, files, containers |
-| `sentinel scan` | Deep-scan an agent file for misconfigurations, dangerous grants, and posture issues |
+The standalone CLI is the nmap of AI agents and MCP servers — deterministic, protocol-based, no API key required for any scan.
+
+```bash
+sentinel discover --subnet 10.0.0.0/24       # find MCP servers across a network
+sentinel mcp scan http://localhost:8000/sse  # MCP server security audit
+sentinel supply-chain http://localhost:8000/sse  # supply chain integrity check
+sentinel scan ./agents/                      # static posture scan of agent code
+sentinel a2a ./agents/                       # multi-agent trust boundary analysis
+sentinel secrets .                           # credentials, PII, memory contamination
+sentinel inspect my_agent.py                 # fingerprint framework, model, role
+```
+
+The CLI covers 7 of the 10 risks in the OWASP Top 10 for Agentic Applications 2026. See the [agentsentinel-cli repository](https://github.com/jaydenaung/agentsentinel-cli) for full documentation, rules reference, and CI/CD integration guides.
 
 ---
 
-### `sentinel discover`
-
-Finds AI agents you may not know are running — including unmonitored ones with exposed API keys.
-
-```bash
-sentinel discover
-```
-
-**Sample output:**
-
-```
-╭───────────────────────────────────────────────────────────────╮
-│  AgentSentinel — Discover                                     │
-│  Scanning: processes · network · subnet (10.0.1.0/24)         │
-╰───────────────────────────────────────────────────────────────╯
-
-  PROCESS SCAN ──────────────────────────────────────────────────
-
-  🔴  CRITICAL  mcp-shim           MCP + OpenAI              pid:62508
-                ⚠  API key exposed: OPENAI_API_KEY=sk-proj-...wcgA
-                LLM API key exposed in process environment
-                → sentinel scan --pid 62508
-
-  NETWORK SCAN ──────────────────────────────────────────────────
-
-  🟢  LOW       agentsentinel@127.0.0.1:9000  AgentSentinel   127.0.0.1:9000
-                AgentSentinel monitoring platform
-                → sentinel scan --connect http://127.0.0.1:9000
-
-  🟡  MEDIUM    llm-api@127.0.0.1:11434  OpenAI-compatible   127.0.0.1:11434
-                Model: llama3.2:latest
-                OpenAI-compatible API with no authentication — open access
-                → sentinel scan --url http://127.0.0.1:11434
-
-  SUBNET SCAN ───────────────────────────────────────────────────
-
-  🟠  HIGH      mcp-server@10.0.1.45:8080  MCP Server        10.0.1.45:8080
-                MCP server with no authentication detected — inspect tools
-                → sentinel mcp scan http://10.0.1.45:8080/sse
-
-  ───────────────────────────────────────────────────────────────
-  4 agents found · 1 CRITICAL · 1 HIGH · 1 MEDIUM · 1 LOW
-
-  ⚠  1 agent has an API key exposed in the environment.
-  Exposed keys are visible to all processes on this host. Rotate them
-  and move to a secrets manager.
-
-  Subnet scan: 10.0.1.0/24 — 254 hosts · 3 open ports · 4.2s
-```
-
-#### Scan vectors
-
-| Flag | What it scans | Requires |
-|------|--------------|----------|
-| `--process` *(default on)* | Running Python/Node processes making LLM API calls | `psutil` |
-| `--network` *(default on)* | Local ports for MCP servers, agent APIs, Ollama | `httpx` |
-| `--subnet CIDR` | Every host in an internal subnet — e.g. `10.0.0.0/24` | `httpx` |
-| `--path DIR` | Python source files in a directory | nothing extra |
-| `--docker` *(default off)* | Running Docker containers with LLM API key env vars | `docker` CLI |
-
-The subnet scan uses a two-phase approach: parallel TCP connect across all host:port combinations (fast), then targeted HTTP probes on open ports only to identify agent type. `/24` (254 hosts) typically completes in under 5 seconds.
-
-#### Usage examples
-
-```bash
-# Default — scan processes and network
-sentinel discover
-
-# Include Docker containers
-sentinel discover --docker
-
-# Scan a source directory for agent files
-sentinel discover --path ./agents/
-
-# Scan an internal subnet for AI agents across the network
-sentinel discover --subnet 10.0.0.0/24
-
-# Subnet scan with custom port range
-sentinel discover --subnet 10.0.0.0/24 --ports 8000-9001
-
-# Network scan only, custom port range
-sentinel discover --no-process --ports 8000-9001
-
-# Machine-readable output for pipelines
-sentinel discover --format json
-
-# Verbose — show full details per agent
-sentinel discover --verbose
-```
-
-#### Framework detection
-
-`sentinel discover` identifies agents built with:
-
-LangChain · OpenAI Agents SDK · MCP · CrewAI · AutoGen · Semantic Kernel · LlamaIndex · Haystack · PydanticAI · Google ADK · Anthropic SDK · OpenAI SDK
-
-It also detects the active LLM provider from environment variables:
-`ANTHROPIC_API_KEY` · `OPENAI_API_KEY` · `GOOGLE_API_KEY` · `GROQ_API_KEY` · `MISTRAL_API_KEY` · `HUGGINGFACE_TOKEN` · and 8 more
-
-#### Risk levels
-
-| Level | Meaning |
-|-------|---------|
-| 🔴 CRITICAL | API key exposed in process environment (visible to all processes on the host) |
-| 🟠 HIGH | Active connection to LLM API — agent is live and making calls |
-| 🟡 MEDIUM | Agent detected with write or dangerous tool grants |
-| 🟢 LOW | Agent detected, low risk signals (e.g. already monitored) |
-| ⚪ UNKNOWN | Agent detected — run `sentinel scan` for full analysis |
-
-> **Note:** `sentinel discover` exits with code 1 if any CRITICAL agents are found,
-> making it usable as a CI gate.
-
----
-
-### `sentinel scan`
-
-Deep-scan a single agent file or directory for security misconfigurations.
-
-```bash
-sentinel scan my_agent.py
-```
-
-**Sample output:**
-
-```
-╭─────────────────────────────────────────────╮
-│  AgentSentinel Security Scan                │
-│  Target: my_agent.py                        │
-╰─────────────────────────────────────────────╯
-
-  Scope    Tool
-  ─────────────────────────────────────────
-  read     search_crm
-  read     read_database
-  write    send_email      ⚠ dangerous
-  write    write_file
-
-  ● CRITICAL  EXFILTRATION_PATH
-             Agent holds both internal-read and external-write grants.
-             Internal-read: read_database, search_crm | External-write: send_email
-
-  ● HIGH      DANGEROUS_GRANTS
-             Agent holds dangerous tool grants. Verify intent and add rate limits.
-
-  Posture Score   35/100  ███████░░░░░░░░░░░░░  CRITICAL
-```
-
-#### Usage examples
-
-```bash
-# Scan a single file
-sentinel scan my_agent.py
-
-# Scan a directory (recursive)
-sentinel scan ./agents/
-
-# Gate CI/CD — exit code 1 on CRITICAL findings
-sentinel scan my_agent.py --fail-on CRITICAL
-
-# JSON output for integration with other tools
-sentinel scan my_agent.py --format json
-
-# Include live behavior data from a running AgentSentinel instance
-sentinel scan my_agent.py \
-  --connect http://localhost:9000 \
-  --api-key $AGENTSENTINEL_API_KEY
-```
-
-#### CI/CD integration
-
-Block merges when CRITICAL agent security issues are detected:
-
-```yaml
-# .github/workflows/security.yml
-name: Agent Security Scan
-on: [pull_request]
-
-jobs:
-  scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: pip install agentsentinel-cli
-      - run: sentinel scan ./agents/ --fail-on CRITICAL
-```
-
-#### What it detects
-
-| Rule | Severity | Trigger |
-|------|----------|---------|
-| `EXFILTRATION_PATH` | CRITICAL | Agent holds internal-read AND external-write grants |
-| `CODE_EXECUTION_GRANT` | CRITICAL | Agent can execute arbitrary code |
-| `HARDCODED_CREDENTIALS` | CRITICAL | API keys hardcoded in source |
-| `DANGEROUS_GRANTS` | HIGH | Agent holds dangerous tool grants |
-| `PRIVILEGE_EXCESS` | HIGH | Write grants on a read-only described agent |
-| `PROMPT_INJECTION_VECTOR` | HIGH | Web-read + write grants (injection-to-write path) |
-| `LATERAL_MOVEMENT_PATH` | HIGH | Admin + infrastructure grants combined |
-| `UNDESCRIBED_WRITE_AGENT` | MEDIUM | Write grants with no agent description |
-| `TOOL_SPRAWL` | MEDIUM | More than 10 tools across 5+ categories |
-| `MISSING_RATE_LIMIT` | LOW | Dangerous grants with no rate limit |
-
-#### Tool detection
-
-Detects tools defined via:
-- `@tool` / `@SentinelTool` decorators (LangChain, CrewAI)
-- `BaseTool` / `StructuredTool` subclasses
-- `Tool(name=...)` and `StructuredTool(name=...)` instantiations
